@@ -77,3 +77,7 @@ Stop with **Ctrl+C**.
 
 Quick check without a call: play an English YouTube video with the Multi-Output Device selected
 and run `python main.py` — transcribed lines appear every ~5 seconds.
+
+## License
+
+MIT, see [LICENSE](LICENSE).
