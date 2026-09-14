@@ -3,14 +3,15 @@
 Local real-time call translator for macOS (Apple Silicon).
 
 Captures the audio of a video call (Meet / Zoom / Teams / anything), transcribes it locally
-with faster-whisper and shows the original text together with a translation into the language you pick.
+with faster-whisper and shows a live translation into the language you pick.
 
 ```
 [call audio] → [BlackHole] → [faster-whisper: speech → text] → [translate] → [overlay + stdout]
 ```
 
-The window shows the last ~10 lines: original text in grey, translation below it. It stays on top, does not take focus
-from the call, and can be dragged with the mouse. Everything is also printed to stdout.
+The window shows the last ~10 lines. The line being spoken appears after ~1.5 s and is refined every second
+(grey); when the speaker pauses it is finalised (white). The window stays on top, does not take focus from the call,
+and can be dragged with the mouse. Final lines (original + translation) are also printed to stdout.
 
 ## 1. Install BlackHole
 
@@ -18,16 +19,19 @@ from the call, and can be dragged with the mouse. Everything is also printed to 
 brew install blackhole-2ch
 ```
 
-If `BlackHole 2ch` does not appear as an audio device afterwards, log out and back in (or reboot).
+The driver is loaded only after restarting Core Audio: `sudo killall coreaudiod` (or reboot).
+Check with `python main.py --list-devices` — `BlackHole 2ch` must be in the list.
 
 ## 2. Route call audio to BlackHole *and* your speakers
 
-1. Open **Audio MIDI Setup** (Spotlight → "Audio MIDI Setup").
+1. Open **Audio MIDI Setup**: `open -a "Audio MIDI Setup"` (or ⌘ Space → "Audio MIDI Setup").
+   If you see the MIDI Studio window, switch with **Window → Show Audio Devices** (⌘1).
 2. Click **+** in the bottom-left → **Create Multi-Output Device**.
 3. Tick your real output (e.g. **MacBook Pro Speakers** or your headphones) **and** **BlackHole 2ch**.
 4. Make your real output the **Primary Device** (top), and enable **Drift Correction** for BlackHole.
 5. Optional: double-click the name and rename it to e.g. `Speakers + BlackHole`.
-6. **System Settings → Sound → Output** → choose the Multi-Output Device.
+6. **System Settings → Sound → Output** → choose the **Multi-Output Device** (not BlackHole 2ch itself —
+   then you would hear nothing). Quick switch: ⌥ Option-click the volume icon in the menu bar.
    Alternatively set it only as the speaker in the call app (Zoom/Teams/Meet audio settings).
 
 Notes:
@@ -41,7 +45,7 @@ Use Python 3.12 (some dependencies do not ship wheels for newer versions yet).
 
 ```sh
 brew install python@3.12
-cd translator
+cd transwhisper
 python3.12 -m venv .venv
 source .venv/bin/activate     # fish: source .venv/bin/activate.fish
 pip install -r requirements.txt
@@ -57,16 +61,20 @@ Defaults live in `config.py`.
 | Variable | Default | Meaning |
 |---|---|---|
 | `INPUT_DEVICE` | `BlackHole` | Input device name substring or index (`python main.py --list-devices`) |
-| `CHUNK_SECONDS` | `5` | Length of an audio chunk |
-| `SILENCE_THRESHOLD` | `0.003` | Chunks with mean amplitude below this are skipped |
-| `MODEL_SIZE` | `small` | Whisper model: `small` (fast) or `medium` (more accurate, slower) |
-| `SOURCE_LANG` | `en` | Language spoken in the call, or `auto` to detect it per chunk |
+| `SILENCE_THRESHOLD` | `0.003` | Audio quieter than this (RMS) is never treated as speech |
+| `PARTIAL_STEP_SECONDS` | `1.0` | How often the line being spoken is updated |
+| `PAUSE_SECONDS` | `0.6` | A pause this long finalises the line |
+| `MAX_SEGMENT_SECONDS` | `8` | Long speech without pauses is split at a short breath around this length |
+| `MODEL_SIZE` | `small` | Whisper model: `base` (fastest, less accurate), `small`, `medium` (slow) |
+| `WHISPER_THREADS` | `8` | CPU threads for Whisper |
+| `SOURCE_LANG` | `en` | Language spoken in the call, or `auto` to detect it per line |
 | `TARGET_LANG` | `uk` | Language to translate into (`de`, `pl`, `es`, ...) |
 | `TRANSLATE_BACKEND` | `argos`, or `deepl` if a key is set | Translation backend |
 | `DEEPL_API_KEY` | — | DeepL API key (free tier), only from env/.env |
 | `ARGOS_DIR` | `~/.local/share/transwhisper/argos` | Where Argos models are downloaded |
 | `MAX_ENTRIES` | `10` | Lines kept in the window |
 | `OVERLAY_OPACITY` | `0.85` | Window opacity |
+| `SHOW_ORIGINAL` | `0` | `1` shows the original text above the translation |
 
 ### Translation backends
 
@@ -80,22 +88,23 @@ Defaults live in `config.py`.
   ```
 
   With a key present DeepL is used automatically. If the key is missing or invalid the app falls back to Argos.
-  Note that with DeepL the call transcript is sent to DeepL's servers.
+  Note that with DeepL the call transcript is sent to DeepL's servers, and live updates re-translate the current
+  line every second, which uses the character quota several times faster than final lines alone.
 
 ## 5. Run
 
 ```sh
 python main.py                  # live capture
 python main.py --list-devices   # show input devices
-python main.py --file talk.wav  # run the pipeline on an audio file (testing)
+python main.py --file talk.wav  # play an audio file through the pipeline in real time (testing)
 python main.py --no-overlay     # stdout only, no window
-python main.py -v               # debug logging (shows skipped silent chunks)
+python main.py -v               # debug logging (latency of every update)
 ```
 
 Stop with **Ctrl+C**.
 
 Quick check without a call: play an English YouTube video with the Multi-Output Device selected
-and run `python main.py` — transcribed lines appear every ~5 seconds.
+and run `python main.py` — the translation appears ~1.5 s after the speaker starts talking.
 
 ## License
 
