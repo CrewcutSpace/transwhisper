@@ -39,6 +39,7 @@ class Pipeline:
         self.stopped = threading.Event()
         self._failed_sources: set[str] = set()
         self._shown_partial = False
+        self._last_audio_at = time.monotonic()
 
     def stop(self):
         self.stopped.set()
@@ -54,6 +55,7 @@ class Pipeline:
             if block is None:
                 return False
             self.segmenter.add(block)
+            self._last_audio_at = time.monotonic()
             try:
                 block = self.blocks.get_nowait()
             except queue.Empty:
@@ -80,9 +82,10 @@ class Pipeline:
 
         translated = self._translate(result.text, result.language)
         logger.debug(
-            "{} {:.1f}s audio: whisper {:.2f}s, translate {:.2f}s",
+            "{} {:.1f}s audio: waited {:.2f}s, whisper {:.2f}s, translate {:.2f}s, lag {:.2f}s | {}",
             "final  " if segment.final else "partial", len(segment.audio) / WHISPER_RATE,
-            transcribed - started, time.monotonic() - transcribed,
+            started - self._last_audio_at, transcribed - started, time.monotonic() - transcribed,
+            time.monotonic() - self._last_audio_at, result.text[-50:],
         )
         if segment.final:
             print(f"[{result.language}] {result.text}\n     {translated}", flush=True)
