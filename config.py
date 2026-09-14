@@ -26,14 +26,16 @@ SILENCE_THRESHOLD = float(_get("SILENCE_THRESHOLD", "0.003"))
 
 # --- Streaming -------------------------------------------------------------
 # How often the line being spoken is re-transcribed and updated on screen.
-PARTIAL_STEP_SECONDS = float(_get("PARTIAL_STEP_SECONDS", "1.0"))
+PARTIAL_STEP_SECONDS = float(_get("PARTIAL_STEP_SECONDS", "0.5"))
 # A pause this long ends the current line.
 PAUSE_SECONDS = float(_get("PAUSE_SECONDS", "0.6"))
 # Lines are force-split when someone talks this long without a pause.
 MAX_SEGMENT_SECONDS = float(_get("MAX_SEGMENT_SECONDS", "8"))
 
 # --- Transcription (faster-whisper) ----------------------------------------
-MODEL_SIZE = _get("MODEL_SIZE", "small")  # base (fastest) | small | medium
+# base: ~0.3 s per update (default) | small: ~0.7 s, more accurate | medium: slow.
+# For English the English-only variant (base.en, ...) is picked automatically.
+MODEL_SIZE = _get("MODEL_SIZE", "base")
 WHISPER_DEVICE = _get("WHISPER_DEVICE", "cpu")
 WHISPER_COMPUTE_TYPE = _get("WHISPER_COMPUTE_TYPE", "int8")
 WHISPER_THREADS = int(_get("WHISPER_THREADS", "8"))

@@ -6,6 +6,8 @@ import numpy as np
 from faster_whisper import WhisperModel
 from loguru import logger
 
+ENGLISH_ONLY_MODELS = {"tiny", "base", "small", "medium"}
+
 
 @dataclass
 class Transcript:
@@ -17,6 +19,9 @@ class Transcriber:
     def __init__(self, model_size: str, device: str, compute_type: str, threads: int, language: str):
         # "auto" lets Whisper detect the language of every line.
         self.language = None if language == "auto" else language
+        # English-only models are faster and more accurate for English.
+        if language == "en" and model_size in ENGLISH_ONLY_MODELS:
+            model_size = f"{model_size}.en"
         try:
             self.model = WhisperModel(model_size, device=device, compute_type=compute_type, cpu_threads=threads)
             logger.info("Whisper model '{}' loaded (device={}, compute_type={}, threads={})", model_size, device, compute_type, threads)
