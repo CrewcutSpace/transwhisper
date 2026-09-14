@@ -1,13 +1,11 @@
 """System audio capture from a virtual input device (BlackHole)."""
 
-import logging
 import queue
 import threading
 
 import numpy as np
 import sounddevice as sd
-
-log = logging.getLogger(__name__)
+from loguru import logger
 
 WHISPER_RATE = 16000
 
@@ -75,7 +73,7 @@ def bounded_put(q: queue.Queue, item) -> None:
         except queue.Full:
             try:
                 q.get_nowait()
-                log.warning("Transcription is falling behind, dropped an audio chunk")
+                logger.warning("Transcription is falling behind, dropped an audio chunk")
             except queue.Empty:
                 pass
 
@@ -100,7 +98,7 @@ class AudioCapture:
 
     def _callback(self, indata, frames, time_info, status):
         if status:
-            log.debug("Audio status: %s", status)
+            logger.debug("Audio status: {}", status)
         self._blocks.put(indata.copy())
 
     def _assemble(self):
@@ -120,7 +118,7 @@ class AudioCapture:
             buffered, count = [], 0
             audio = to_whisper_format(frames, self.rate)
             if is_silent(audio, self.silence_threshold):
-                log.debug("Skipped silent chunk (level %.5f)", float(np.mean(np.abs(audio))))
+                logger.debug("Skipped silent chunk (level {:.5f})", float(np.mean(np.abs(audio))))
                 continue
             bounded_put(self.out, audio)
 
@@ -135,7 +133,7 @@ class AudioCapture:
         self._stream.start()
         self._worker = threading.Thread(target=self._assemble, name="audio-assembler", daemon=True)
         self._worker.start()
-        log.info("Capturing from [%d] %s @ %d Hz, %d ch", self.device, self.name, self.rate, self.channels)
+        logger.info("Capturing from [{}] {} @ {} Hz, {} ch", self.device, self.name, self.rate, self.channels)
 
     def stop(self):
         self._stop.set()

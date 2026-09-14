@@ -2,6 +2,7 @@
 variables or a .env file in the project root."""
 
 import os
+from pathlib import Path
 
 from dotenv import load_dotenv
 
@@ -34,6 +35,9 @@ TARGET_LANG = _get("TARGET_LANG", "uk").lower()
 DEEPL_API_KEY = os.getenv("DEEPL_API_KEY", "").strip()
 # deepl | argos. Defaults to deepl only when a key is present.
 TRANSLATE_BACKEND = _get("TRANSLATE_BACKEND", "deepl" if DEEPL_API_KEY else "argos").lower()
+# Where downloaded Argos models are stored.
+ARGOS_DIR = Path(_get("ARGOS_DIR", str(Path.home() / ".local/share/transwhisper/argos"))).expanduser()
 
 # --- Overlay ---------------------------------------------------------------
 MAX_ENTRIES = int(_get("MAX_ENTRIES", "10"))
+OVERLAY_OPACITY = float(_get("OVERLAY_OPACITY", "0.85"))
