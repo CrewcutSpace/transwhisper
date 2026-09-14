@@ -1,6 +1,7 @@
 """Turns a continuous 16 kHz audio stream into lines: partial ones while someone is
 speaking (re-transcribed every step) and a final one when they pause."""
 
+import re
 from dataclasses import dataclass
 
 import numpy as np
@@ -9,6 +10,53 @@ from faster_whisper.vad import VadOptions, get_speech_timestamps
 RATE = 16000
 VAD_WINDOW = 512  # Silero VAD frame size at 16 kHz
 KEEP_BEFORE_SPEECH = int(0.3 * RATE)
+
+
+def normalize_word(word: str) -> str:
+    return re.sub(r"[^\w']", "", word.lower())
+
+
+def split_units(words: list[str], min_clause_words: int) -> tuple[list[list[str]], list[str]]:
+    """Split words into translation units: sentences, and clauses after a comma etc. once they
+    are long enough to translate on their own. Returns (complete units, unfinished tail).
+    A unit counts as complete only when more words follow it: Whisper often puts a full stop
+    after the last word it has heard so far, even mid-sentence."""
+    units: list[list[str]] = []
+    current: list[str] = []
+    for word in words:
+        current.append(word)
+        if word.endswith((".", "!", "?", "…")) or (word.endswith((",", ";", ":")) and len(current) >= min_clause_words):
+            units.append(current)
+            current = []
+    if not current and units:
+        current = units.pop()
+    return units, current
+
+
+class StableText:
+    """Local agreement for partial lines: a word is shown only once two consecutive
+    transcriptions of the growing line agree on it, and shown words never disappear.
+    This hides the half-heard last word that Whisper guesses differently every time."""
+
+    def __init__(self):
+        self.reset()
+
+    def reset(self):
+        self.words: list[str] = []
+        self._previous: list[str] = []
+
+    def update(self, text: str) -> str:
+        words = text.split()
+        agreed = 0
+        for a, b in zip(self._previous, words):
+            if normalize_word(a) != normalize_word(b):
+                break
+            agreed += 1
+        self._previous = words
+        # Extend only when the new transcription is consistent with what is already shown.
+        if agreed > len(self.words):
+            self.words = words[:agreed]
+        return " ".join(self.words)
 
 
 @dataclass

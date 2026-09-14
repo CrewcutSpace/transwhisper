@@ -9,8 +9,9 @@ with faster-whisper and shows a live translation into the language you pick.
 [call audio] → [BlackHole] → [faster-whisper: speech → text] → [translate] → [overlay + stdout]
 ```
 
-The window shows the last ~10 lines. The line being spoken appears after ~1 s and is refined twice a second
-(grey); when the speaker pauses it is finalised (white). The window stays on top, does not take focus from the call,
+The window shows the last ~10 lines. The line being spoken appears after ~1.5 s. A word is shown only once it has been
+recognised the same way twice, so shown text does not jump around. Each finished sentence or clause is translated
+once and stays fixed (white); only the part still being spoken is updated (grey). The window stays on top, does not take focus from the call,
 and can be dragged with the mouse. Final lines (original + translation) are also printed to stdout.
 
 ## 1. Install BlackHole
@@ -62,9 +63,9 @@ Defaults live in `config.py`.
 |---|---|---|
 | `INPUT_DEVICE` | `BlackHole` | Input device name substring or index (`python main.py --list-devices`) |
 | `SILENCE_THRESHOLD` | `0.003` | Audio quieter than this (RMS) is never treated as speech |
-| `PARTIAL_STEP_SECONDS` | `0.5` | How often the line being spoken is updated |
+| `PARTIAL_STEP_SECONDS` | `0.4` | How often the line being spoken is updated |
 | `PAUSE_SECONDS` | `0.6` | A pause this long finalises the line |
-| `MAX_SEGMENT_SECONDS` | `8` | Long speech without pauses is split at a short breath around this length |
+| `MAX_SEGMENT_SECONDS` | `12` | Long speech without pauses is split at a short breath around this length |
 | `MODEL_SIZE` | `base` | Whisper model: `base` (~0.3 s per update), `small` (~0.7 s, more accurate), `medium` (slow). With `SOURCE_LANG=en` the English-only variant is used |
 | `WHISPER_THREADS` | `8` | CPU threads for Whisper |
 | `SOURCE_LANG` | `en` | Language spoken in the call, or `auto` to detect it per line |
@@ -89,7 +90,7 @@ Defaults live in `config.py`.
 
   With a key present DeepL is used automatically. If the key is missing or invalid the app falls back to Argos.
   Note that with DeepL the call transcript is sent to DeepL's servers, and live updates re-translate the current
-  line twice a second, which uses the character quota several times faster than final lines alone.
+  unfinished clause on every update, which uses the character quota faster than final lines alone.
 
 ## 5. Run
 
@@ -104,7 +105,7 @@ python main.py -v               # debug logging (latency of every update)
 Stop with **Ctrl+C**.
 
 Quick check without a call: play an English YouTube video with the Multi-Output Device selected
-and run `python main.py` — the translation appears ~1 s after the speaker starts talking.
+and run `python main.py` — the translation appears ~1.5 s after the speaker starts talking.
 
 ## License
 

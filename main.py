@@ -12,7 +12,7 @@ from loguru import logger
 
 import config
 from audio import BLOCK_SECONDS, WHISPER_RATE, AudioCapture, DeviceNotFoundError, find_input_device, list_input_devices
-from stream import Segment, Segmenter
+from stream import Segment, Segmenter, StableText, normalize_word, split_units
 from transcribe import Transcriber
 from translate import TranslationError, create_translator
 
@@ -29,6 +29,23 @@ def play_file(path: str, out: queue.Queue):
     out.put(None)
 
 
+MIN_CLAUSE_WORDS = 4
+
+
+def _find_unit_end(words: list[str], unit: list[str], start: int, slack: int = 3) -> int | None:
+    """Index right after `unit` in `words`, looking near `start + len(unit)`. The final
+    transcription may differ by a word or two, so match on the unit's last two words."""
+    if not unit:
+        return start
+    expected = start + len(unit)
+    anchor = unit[-2:]
+    for end in sorted(range(expected - slack, expected + slack + 1), key=lambda e: abs(e - expected)):
+        if len(anchor) <= end <= len(words) and end > start:
+            if [normalize_word(w) for w in words[end - len(anchor):end]] == anchor:
+                return end
+    return None
+
+
 class Pipeline:
     def __init__(self, blocks: queue.Queue, segmenter: Segmenter, transcriber, translator, on_entry):
         self.blocks = blocks
@@ -40,6 +57,12 @@ class Pipeline:
         self._failed_sources: set[str] = set()
         self._shown_partial = False
         self._last_audio_at = time.monotonic()
+        self.stable = StableText()
+        self._cache: dict[tuple[str, str], str] = {}
+        # Current line: (source, translation) units already frozen on screen.
+        self._frozen: list[tuple[str, str]] = []
+        self._shown = ("", "")
+        self._language = transcriber.language or "en"
 
     def stop(self):
         self.stopped.set()
@@ -62,35 +85,87 @@ class Pipeline:
                 return True
 
     def _translate(self, text: str, language: str) -> str:
+        """Translate one sentence. Cached, so a sentence already on screen keeps exactly the
+        same translation when it is shown again (and DeepL is not billed twice)."""
+        key = (language, " ".join(normalize_word(w) for w in text.split()))
+        if key in self._cache:
+            return self._cache[key]
         try:
-            return self.translator.translate(text, language)
+            translated = self.translator.translate(text, language)
         except TranslationError as exc:
             if language not in self._failed_sources:
                 logger.error("{}", exc)
                 self._failed_sources.add(language)
             return f"[{language}] {text}"
+        self._cache[key] = translated
+        return translated
 
     def _handle(self, segment: Segment):
         started = time.monotonic()
         result = self.transcriber.transcribe(segment.audio, final=segment.final)
         transcribed = time.monotonic()
-        if not result:
-            if segment.final and self._shown_partial:
-                self.on_entry("", "", True)
-                self._shown_partial = False
-            return
 
-        translated = self._translate(result.text, result.language)
+        if result:
+            self._language = result.language
+        if segment.final:
+            words = self._final_words(result.text.split() if result else [])
+        else:
+            words = self.stable.update(result.text if result else "").split()[len(self._frozen_words()):]
+            if not words and not self._frozen:
+                return
+
+        units, tail = split_units(words, MIN_CLAUSE_WORDS)
+        if segment.final:
+            units, tail = units + [tail] if tail else units, []
+        # Complete units are translated once and never change on screen again.
+        for unit in units:
+            source = " ".join(unit)
+            self._frozen.append((source, self._translate(source, self._language)))
+        done_text = " ".join(translated for _, translated in self._frozen)
+        pending_text = self._translate(" ".join(tail), self._language) if tail else ""
+        original = " ".join(source for source, _ in self._frozen + [(" ".join(tail), "")]).strip()
+
+        if not segment.final and (done_text, pending_text) == self._shown:
+            return
+        self._shown = (done_text, pending_text)
         logger.debug(
-            "{} {:.1f}s audio: waited {:.2f}s, whisper {:.2f}s, translate {:.2f}s, lag {:.2f}s | {}",
+            "{} {:.1f}s audio: waited {:.2f}s, whisper {:.2f}s, translate {:.2f}s, lag {:.2f}s | {} ~ {}",
             "final  " if segment.final else "partial", len(segment.audio) / WHISPER_RATE,
             started - self._last_audio_at, transcribed - started, time.monotonic() - transcribed,
-            time.monotonic() - self._last_audio_at, result.text[-50:],
+            time.monotonic() - self._last_audio_at, done_text[-50:], pending_text,
         )
+
         if segment.final:
-            print(f"[{result.language}] {result.text}\n     {translated}", flush=True)
-        self.on_entry(result.text, translated, segment.final)
+            self.stable.reset()
+            self._frozen = []
+            self._shown = ("", "")
+            self._cache.clear()
+            if not original:
+                if self._shown_partial:
+                    self.on_entry("", "", "", True)
+                    self._shown_partial = False
+                return
+            print(f"[{self._language}] {original}\n     {done_text}", flush=True)
+        self.on_entry(original, done_text, pending_text, segment.final)
         self._shown_partial = not segment.final
+
+    def _frozen_words(self) -> list[str]:
+        return " ".join(source for source, _ in self._frozen).split()
+
+    def _final_words(self, final: list[str]) -> list[str]:
+        """Reconcile the final transcription with units already frozen on screen: keep those
+        that the final text still contains and return only the words after them."""
+        position = 0
+        kept = 0
+        for source, _ in self._frozen:
+            unit = [normalize_word(w) for w in source.split()]
+            end = _find_unit_end(final, unit, position)
+            if end is None:
+                break
+            position, kept = end, kept + 1
+        # Units the final text does not contain (a line split before them) are heard again in the next line.
+        self._frozen = self._frozen[:kept]
+        return final[position:]
 
     @logger.catch
     def run(self):
