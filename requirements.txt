@@ -2,3 +2,7 @@ faster-whisper>=1.2
 sounddevice>=0.5
 numpy>=2.0
 python-dotenv>=1.0
+loguru>=0.7
+sentencepiece>=0.2
+deepl>=1.21
+PySide6>=6.7

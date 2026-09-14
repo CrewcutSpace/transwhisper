@@ -1,12 +1,10 @@
 """Speech-to-text with faster-whisper."""
 
-import logging
 from dataclasses import dataclass
 
 import numpy as np
 from faster_whisper import WhisperModel
-
-log = logging.getLogger(__name__)
+from loguru import logger
 
 
 @dataclass
@@ -21,13 +19,13 @@ class Transcriber:
         self.language = None if language == "auto" else language
         try:
             self.model = WhisperModel(model_size, device=device, compute_type=compute_type)
-            log.info("Whisper model '%s' loaded (device=%s, compute_type=%s)", model_size, device, compute_type)
+            logger.info("Whisper model '{}' loaded (device={}, compute_type={})", model_size, device, compute_type)
         except Exception as exc:
             if (device, compute_type) == ("cpu", "int8"):
                 raise
-            log.warning("Could not load model with device=%s/%s (%s), falling back to cpu/int8", device, compute_type, exc)
+            logger.warning("Could not load model with device={}/{} ({}), falling back to cpu/int8", device, compute_type, exc)
             self.model = WhisperModel(model_size, device="cpu", compute_type="int8")
-            log.info("Whisper model '%s' loaded (device=cpu, compute_type=int8)", model_size)
+            logger.info("Whisper model '{}' loaded (device=cpu, compute_type=int8)", model_size)
 
     def transcribe(self, audio: np.ndarray) -> Transcript | None:
         segments, info = self.model.transcribe(
