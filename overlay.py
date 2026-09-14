@@ -13,7 +13,7 @@ MARGIN = 16
 class _Bridge(QObject):
     """Carries entries from worker threads to the GUI thread."""
 
-    entry = Signal(str, str, bool)
+    entry = Signal(str, str, str, bool)
 
 
 class Overlay(QWidget):
@@ -67,19 +67,22 @@ class Overlay(QWidget):
         height = screen.height() - 2 * MARGIN
         self.setGeometry(screen.right() - WIDTH - MARGIN, screen.top() + MARGIN, WIDTH, height)
 
-    def update_entry(self, original: str, translated: str, final: bool):
-        """Thread-safe. Partial updates replace the current line; a final one commits it."""
-        self._bridge.entry.emit(original, translated, final)
+    def update_entry(self, original: str, done: str, pending: str, final: bool):
+        """Thread-safe. `done` sentences will not change any more (white), `pending` is the
+        sentence still being spoken (grey). Partial updates replace the current line; a final one commits it."""
+        self._bridge.entry.emit(original, done, pending, final)
 
-    def _render(self, original: str, translated: str, final: bool) -> str:
-        color = "#f2f2f2" if final else "#b8b8b8"
-        text = f'<div style="color:{color}; font-size:17px;">{html.escape(translated)}</div>'
+    def _render(self, original: str, done: str, pending: str) -> str:
+        text = (
+            f'<div style="font-size:17px;"><span style="color:#f2f2f2;">{html.escape(done)}</span> '
+            f'<span style="color:#9a9a9a;">{html.escape(pending)}</span></div>'
+        )
         if self.show_original:
             text = f'<div style="color:#8a8a8a; font-size:13px; margin-bottom:3px;">{html.escape(original)}</div>' + text
         return text
 
-    def _update(self, original: str, translated: str, final: bool):
-        if not translated.strip():
+    def _update(self, original: str, done: str, pending: str, final: bool):
+        if not (done + pending).strip():
             # The line turned out to be noise: drop whatever partial text was shown.
             if final and self._pending is not None:
                 self._pending.deleteLater()
@@ -92,7 +95,7 @@ class Overlay(QWidget):
             self._pending.setFocusPolicy(Qt.FocusPolicy.NoFocus)
             self._feed.addWidget(self._pending)
 
-        self._pending.setText(self._render(original, translated, final))
+        self._pending.setText(self._render(original, done, pending))
         if final:
             self._pending = None
 

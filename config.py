@@ -26,11 +26,11 @@ SILENCE_THRESHOLD = float(_get("SILENCE_THRESHOLD", "0.003"))
 
 # --- Streaming -------------------------------------------------------------
 # How often the line being spoken is re-transcribed and updated on screen.
-PARTIAL_STEP_SECONDS = float(_get("PARTIAL_STEP_SECONDS", "0.5"))
+PARTIAL_STEP_SECONDS = float(_get("PARTIAL_STEP_SECONDS", "0.4"))
 # A pause this long ends the current line.
 PAUSE_SECONDS = float(_get("PAUSE_SECONDS", "0.6"))
 # Lines are force-split when someone talks this long without a pause.
-MAX_SEGMENT_SECONDS = float(_get("MAX_SEGMENT_SECONDS", "8"))
+MAX_SEGMENT_SECONDS = float(_get("MAX_SEGMENT_SECONDS", "12"))
 
 # --- Transcription (faster-whisper) ----------------------------------------
 # base: ~0.3 s per update (default) | small: ~0.7 s, more accurate | medium: slow.
