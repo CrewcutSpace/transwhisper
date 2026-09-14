@@ -12,6 +12,7 @@ from loguru import logger
 
 ARGOS_INDEX_URL = "https://raw.githubusercontent.com/argosopentech/argospm-index/main/index.json"
 USER_AGENT = "transwhisper"
+LATEST_ARGOS_VERSION = (1, 9)
 
 
 class TranslationError(RuntimeError):
@@ -28,6 +29,10 @@ class Translator(Protocol):
 
 
 # --- Argos -----------------------------------------------------------------
+
+def _version(text: str) -> tuple[int, ...]:
+    return tuple(int(x) for x in text.split(".") if x.isdigit())
+
 
 def _split_sentences(text: str) -> list[str]:
     return [s for s in re.split(r"(?<=[.!?…])\s+", text.strip()) if s]
@@ -107,20 +112,30 @@ class ArgosTranslator:
         if pair in self._models:
             return self._models[pair]
         package = self._load_index()[pair]
-        path = self.models_dir / package["code"]
-        if not (path / "model").exists():
-            self._download(package, path)
+        installed = [p.parent for p in self.models_dir.glob(f"{package['code']}-*/model")]
+        installed.sort(key=lambda p: _version(p.name.rsplit("-", 1)[1]))
+        path = installed[-1] if installed else self._download(package)
         self._models[pair] = _ArgosModel(path)
-        logger.info("Argos model {}->{} loaded", *pair)
+        logger.info("Argos model {} loaded", path.name)
         return self._models[pair]
 
-    def _download(self, package: dict, path: Path):
-        archive = path.with_suffix(".argosmodel")
+    @staticmethod
+    def _candidates(package: dict) -> list[tuple[str, str]]:
+        """(version, url) to try, best first. The public index lags behind: some pairs have
+        a newer, noticeably better model on argos-net.com that is not listed yet."""
+        listed = [(package["package_version"], url) for url in package["links"] if url.startswith("http")]
+        if _version(package["package_version"]) < LATEST_ARGOS_VERSION:
+            latest = ".".join(map(str, LATEST_ARGOS_VERSION))
+            code_version = "_".join(map(str, LATEST_ARGOS_VERSION))
+            listed.insert(0, (latest, f"https://argos-net.com/v1/{package['code']}-{code_version}.argosmodel"))
+        return listed
+
+    def _download(self, package: dict) -> Path:
+        archive = self.models_dir / f"{package['code']}.argosmodel"
         logger.info("Downloading Argos model {}->{} (~100 MB, one time)...", package["from_code"], package["to_code"])
         last_error = None
-        for url in package["links"]:
-            if not url.startswith("http"):
-                continue  # e.g. ipfs:// mirrors
+        for version, url in self._candidates(package):
+            path = self.models_dir / f"{package['code']}-{version}"
             # argos-net.com rejects the default Python-urllib user agent.
             request = urllib.request.Request(url, headers={"User-Agent": USER_AGENT})
             try:
@@ -140,6 +155,7 @@ class ArgosTranslator:
         if extracted != path:
             extracted.rename(path)
         archive.unlink()
+        return path
 
     def prepare(self, source: str) -> None:
         for pair in self._route(source):
