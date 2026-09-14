@@ -13,11 +13,11 @@ MARGIN = 16
 class _Bridge(QObject):
     """Carries entries from worker threads to the GUI thread."""
 
-    entry = Signal(str, str)
+    entry = Signal(str, str, bool)
 
 
 class Overlay(QWidget):
-    def __init__(self, max_entries: int, opacity: float):
+    def __init__(self, max_entries: int, opacity: float, show_original: bool):
         super().__init__(
             None,
             Qt.WindowType.Tool
@@ -33,9 +33,11 @@ class Overlay(QWidget):
         self.setStyleSheet("background-color: #151515;")
 
         self.max_entries = max_entries
+        self.show_original = show_original
+        self._pending: QLabel | None = None  # line still being spoken, updated in place
         self._drag_offset = None
         self._bridge = _Bridge()
-        self._bridge.entry.connect(self._append)
+        self._bridge.entry.connect(self._update)
 
         self._feed = QVBoxLayout()
         self._feed.setContentsMargins(12, 12, 12, 12)
@@ -65,19 +67,34 @@ class Overlay(QWidget):
         height = screen.height() - 2 * MARGIN
         self.setGeometry(screen.right() - WIDTH - MARGIN, screen.top() + MARGIN, WIDTH, height)
 
-    def add_entry(self, original: str, translated: str):
-        """Thread-safe: may be called from any thread."""
-        self._bridge.entry.emit(original, translated)
+    def update_entry(self, original: str, translated: str, final: bool):
+        """Thread-safe. Partial updates replace the current line; a final one commits it."""
+        self._bridge.entry.emit(original, translated, final)
 
-    def _append(self, original: str, translated: str):
-        label = QLabel(
-            f'<div style="color:#9a9a9a; font-size:13px;">{html.escape(original)}</div>'
-            f'<div style="color:#f2f2f2; font-size:17px; margin-top:3px;">{html.escape(translated)}</div>'
-        )
-        label.setWordWrap(True)
-        label.setTextFormat(Qt.TextFormat.RichText)
-        label.setFocusPolicy(Qt.FocusPolicy.NoFocus)
-        self._feed.addWidget(label)
+    def _render(self, original: str, translated: str, final: bool) -> str:
+        color = "#f2f2f2" if final else "#b8b8b8"
+        text = f'<div style="color:{color}; font-size:17px;">{html.escape(translated)}</div>'
+        if self.show_original:
+            text = f'<div style="color:#8a8a8a; font-size:13px; margin-bottom:3px;">{html.escape(original)}</div>' + text
+        return text
+
+    def _update(self, original: str, translated: str, final: bool):
+        if not translated.strip():
+            # The line turned out to be noise: drop whatever partial text was shown.
+            if final and self._pending is not None:
+                self._pending.deleteLater()
+                self._pending = None
+            return
+        if self._pending is None:
+            self._pending = QLabel()
+            self._pending.setWordWrap(True)
+            self._pending.setTextFormat(Qt.TextFormat.RichText)
+            self._pending.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+            self._feed.addWidget(self._pending)
+
+        self._pending.setText(self._render(original, translated, final))
+        if final:
+            self._pending = None
 
         # Index 0 is the stretch that keeps entries pinned to the bottom.
         while self._feed.count() - 1 > self.max_entries:

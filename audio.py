@@ -8,6 +8,7 @@ import sounddevice as sd
 from loguru import logger
 
 WHISPER_RATE = 16000
+BLOCK_SECONDS = 0.1
 
 
 class DeviceNotFoundError(RuntimeError):
@@ -39,7 +40,7 @@ def find_input_device(spec: str) -> int:
         f"Input device '{spec}' not found.\n"
         f"Available input devices:\n{available}\n\n"
         "Fix:\n"
-        "  1. brew install blackhole-2ch  (then log out/in or reboot if it does not show up)\n"
+        "  1. brew install blackhole-2ch, then: sudo killall coreaudiod (or reboot)\n"
         "  2. Set up a Multi-Output Device in Audio MIDI Setup (see README)\n"
         "  3. Or set INPUT_DEVICE to one of the names/indices above"
     )
@@ -60,38 +61,18 @@ def to_whisper_format(frames: np.ndarray, rate: int) -> np.ndarray:
     return np.interp(positions, np.arange(len(mono)), mono).astype(np.float32)
 
 
-def is_silent(audio: np.ndarray, threshold: float) -> bool:
-    return float(np.mean(np.abs(audio))) < threshold
-
-
-def bounded_put(q: queue.Queue, item) -> None:
-    """Put an item, dropping the oldest one if the queue is full."""
-    while True:
-        try:
-            q.put_nowait(item)
-            return
-        except queue.Full:
-            try:
-                q.get_nowait()
-                logger.warning("Transcription is falling behind, dropped an audio chunk")
-            except queue.Empty:
-                pass
-
-
 class AudioCapture:
-    """Reads the input device and pushes 16 kHz mono chunks of speech into a queue."""
+    """Reads the input device and pushes short 16 kHz mono blocks into a queue."""
 
-    def __init__(self, device: int, chunk_seconds: float, silence_threshold: float, out: queue.Queue):
+    def __init__(self, device: int, out: queue.Queue):
         info = sd.query_devices(device)
         self.device = device
         self.name = info["name"]
         self.rate = int(info["default_samplerate"])
         self.channels = min(2, info["max_input_channels"])
-        self.chunk_frames = int(chunk_seconds * self.rate)
-        self.silence_threshold = silence_threshold
         self.out = out
 
-        self._blocks: queue.Queue[np.ndarray] = queue.Queue()
+        self._raw: queue.Queue[np.ndarray] = queue.Queue()
         self._stop = threading.Event()
         self._stream: sd.InputStream | None = None
         self._worker: threading.Thread | None = None
@@ -99,39 +80,27 @@ class AudioCapture:
     def _callback(self, indata, frames, time_info, status):
         if status:
             logger.debug("Audio status: {}", status)
-        self._blocks.put(indata.copy())
+        self._raw.put(indata.copy())
 
-    def _assemble(self):
-        buffered: list[np.ndarray] = []
-        count = 0
+    def _convert(self):
         while not self._stop.is_set():
             try:
-                block = self._blocks.get(timeout=0.2)
+                block = self._raw.get(timeout=0.2)
             except queue.Empty:
                 continue
-            buffered.append(block)
-            count += len(block)
-            if count < self.chunk_frames:
-                continue
-
-            frames = np.concatenate(buffered)
-            buffered, count = [], 0
-            audio = to_whisper_format(frames, self.rate)
-            if is_silent(audio, self.silence_threshold):
-                logger.debug("Skipped silent chunk (level {:.5f})", float(np.mean(np.abs(audio))))
-                continue
-            bounded_put(self.out, audio)
+            self.out.put(to_whisper_format(block, self.rate))
 
     def start(self):
         self._stream = sd.InputStream(
             device=self.device,
             channels=self.channels,
             samplerate=self.rate,
+            blocksize=int(self.rate * BLOCK_SECONDS),
             dtype="float32",
             callback=self._callback,
         )
         self._stream.start()
-        self._worker = threading.Thread(target=self._assemble, name="audio-assembler", daemon=True)
+        self._worker = threading.Thread(target=self._convert, name="audio-convert", daemon=True)
         self._worker.start()
         logger.info("Capturing from [{}] {} @ {} Hz, {} ch", self.device, self.name, self.rate, self.channels)
 

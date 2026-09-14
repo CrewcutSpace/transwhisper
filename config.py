@@ -14,20 +14,30 @@ def _get(name: str, default: str) -> str:
     return value.strip() if value and value.strip() else default
 
 
+def _flag(name: str, default: bool) -> bool:
+    return _get(name, "1" if default else "0").lower() in ("1", "true", "yes", "on")
+
+
 # --- Audio capture ---------------------------------------------------------
 # Substring of the input device name, or its numeric index.
 INPUT_DEVICE = _get("INPUT_DEVICE", "BlackHole")
-CHUNK_SECONDS = float(_get("CHUNK_SECONDS", "5"))
-# Chunks whose mean absolute amplitude is below this are skipped as silence.
+# Audio quieter than this (RMS) is never treated as speech; filters out digital silence and hiss.
 SILENCE_THRESHOLD = float(_get("SILENCE_THRESHOLD", "0.003"))
-# If transcription falls behind, oldest chunks are dropped beyond this backlog.
-MAX_QUEUE_CHUNKS = int(_get("MAX_QUEUE_CHUNKS", "3"))
+
+# --- Streaming -------------------------------------------------------------
+# How often the line being spoken is re-transcribed and updated on screen.
+PARTIAL_STEP_SECONDS = float(_get("PARTIAL_STEP_SECONDS", "1.0"))
+# A pause this long ends the current line.
+PAUSE_SECONDS = float(_get("PAUSE_SECONDS", "0.6"))
+# Lines are force-split when someone talks this long without a pause.
+MAX_SEGMENT_SECONDS = float(_get("MAX_SEGMENT_SECONDS", "8"))
 
 # --- Transcription (faster-whisper) ----------------------------------------
-MODEL_SIZE = _get("MODEL_SIZE", "small")  # small | medium | ...
+MODEL_SIZE = _get("MODEL_SIZE", "small")  # base (fastest) | small | medium
 WHISPER_DEVICE = _get("WHISPER_DEVICE", "cpu")
 WHISPER_COMPUTE_TYPE = _get("WHISPER_COMPUTE_TYPE", "int8")
-# Language spoken in the call: ISO code (en, de, ...) or "auto" to detect per chunk.
+WHISPER_THREADS = int(_get("WHISPER_THREADS", "8"))
+# Language spoken in the call: ISO code (en, de, ...) or "auto" to detect per line.
 SOURCE_LANG = _get("SOURCE_LANG", "en").lower()
 
 # --- Translation -----------------------------------------------------------
@@ -41,3 +51,5 @@ ARGOS_DIR = Path(_get("ARGOS_DIR", str(Path.home() / ".local/share/transwhisper/
 # --- Overlay ---------------------------------------------------------------
 MAX_ENTRIES = int(_get("MAX_ENTRIES", "10"))
 OVERLAY_OPACITY = float(_get("OVERLAY_OPACITY", "0.85"))
+# Show the original (e.g. English) text above the translation.
+SHOW_ORIGINAL = _flag("SHOW_ORIGINAL", False)
