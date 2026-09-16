@@ -4,3 +4,5 @@ __pycache__/
 .env
 .DS_Store
 task.md
+audiotap/audiotap
+audiotap/_CodeSignature/
