@@ -11,7 +11,16 @@ import time
 from loguru import logger
 
 import config
-from audio import BLOCK_SECONDS, WHISPER_RATE, AudioCapture, DeviceNotFoundError, find_input_device, list_input_devices
+from audio import (
+    BLOCK_SECONDS,
+    WHISPER_RATE,
+    AudioCapture,
+    DeviceNotFoundError,
+    SystemAudioCapture,
+    TapUnavailableError,
+    find_input_device,
+    list_input_devices,
+)
 from stream import Segment, Segmenter, StableText, normalize_word, split_units
 from transcribe import Transcriber
 from translate import TranslationError, create_translator
@@ -183,6 +192,14 @@ class Pipeline:
         logger.info("Audio stream finished")
 
 
+def create_capture(blocks: queue.Queue):
+    if config.AUDIO_SOURCE == "tap":
+        return SystemAudioCapture(blocks)
+    device = find_input_device(config.INPUT_DEVICE)
+    logger.info("Input device found: [{}]", device)
+    return AudioCapture(device, blocks)
+
+
 def run(args) -> int:
     logger.info(
         "Config: model={}, source={}, target={}, backend={}, step={}s, pause={}s",
@@ -190,17 +207,18 @@ def run(args) -> int:
         config.PARTIAL_STEP_SECONDS, config.PAUSE_SECONDS,
     )
 
-    # 1. Audio device
-    device = None
+    blocks: queue.Queue = queue.Queue()
+
+    # 1. Audio source
+    capture = None
     if args.file:
         logger.info("Reading audio from file: {}", args.file)
     else:
         try:
-            device = find_input_device(config.INPUT_DEVICE)
-        except DeviceNotFoundError as exc:
+            capture = create_capture(blocks)
+        except (DeviceNotFoundError, TapUnavailableError) as exc:
             logger.error("{}", exc)
             return 1
-        logger.info("Input device found: [{}]", device)
 
     # 2. Translation backend
     translator = create_translator(config.TRANSLATE_BACKEND, config.TARGET_LANG, config.DEEPL_API_KEY, config.ARGOS_DIR)
@@ -227,17 +245,18 @@ def run(args) -> int:
         overlay = Overlay(config.MAX_ENTRIES, config.OVERLAY_OPACITY, config.SHOW_ORIGINAL)
         overlay.show()
 
-    blocks: queue.Queue = queue.Queue()
     segmenter = Segmenter(config.PARTIAL_STEP_SECONDS, config.PAUSE_SECONDS, config.MAX_SEGMENT_SECONDS, config.SILENCE_THRESHOLD)
     pipeline = Pipeline(blocks, segmenter, transcriber, translator, overlay.update_entry if overlay else lambda *_: None)
 
     # 5. Start
-    capture = None
     if args.file:
         threading.Thread(target=play_file, args=(args.file, blocks), daemon=True).start()
     else:
-        capture = AudioCapture(device, blocks)
-        capture.start()
+        try:
+            capture.start()
+        except TapUnavailableError as exc:
+            logger.error("{}", exc)
+            return 1
 
     logger.info("Running. Press Ctrl+C to stop.")
     try:

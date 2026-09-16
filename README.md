@@ -14,31 +14,41 @@ recognised the same way twice, so shown text does not jump around. Each finished
 once and stays fixed (white); only the part still being spoken is updated (grey). The window stays on top, does not take focus from the call,
 and can be dragged with the mouse. Final lines (original + translation) are also printed to stdout.
 
-## 1. Install BlackHole
+## 1. Allow system audio recording
 
-```sh
-brew install blackhole-2ch
-```
+transwhisper listens to what your Mac plays, using a Core Audio process tap (macOS 14.2+).
+Nothing is routed anywhere, so **your speakers, headphones and the volume keys keep working as usual**.
 
-The driver is loaded only after restarting Core Audio: `sudo killall coreaudiod` (or reboot).
-Check with `python main.py --list-devices` — `BlackHole 2ch` must be in the list.
+macOS asks for one permission, and for a program started from a terminal it does not show a prompt —
+switch it on manually, once:
 
-## 2. Route call audio to BlackHole *and* your speakers
+1. **System Settings → Privacy & Security → Screen & System Audio Recording**
+   (`open "x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture"`).
+2. Enable your terminal (iTerm, Terminal, ...). Use **+** to add it if it is not listed.
+3. **Restart the terminal** — the permission only applies to newly started processes.
 
-1. Open **Audio MIDI Setup**: `open -a "Audio MIDI Setup"` (or ⌘ Space → "Audio MIDI Setup").
-   If you see the MIDI Studio window, switch with **Window → Show Audio Devices** (⌘1).
-2. Click **+** in the bottom-left → **Create Multi-Output Device**.
-3. Tick your real output (e.g. **MacBook Pro Speakers** or your headphones) **and** **BlackHole 2ch**.
-4. Make your real output the **Primary Device** (top), and enable **Drift Correction** for BlackHole.
-5. Optional: double-click the name and rename it to e.g. `Speakers + BlackHole`.
-6. **System Settings → Sound → Output** → choose the **Multi-Output Device** (not BlackHole 2ch itself —
-   then you would hear nothing). Quick switch: ⌥ Option-click the volume icon in the menu bar.
-   Alternatively set it only as the speaker in the call app (Zoom/Teams/Meet audio settings).
+The permission is named after screen recording, but nothing is recorded from the screen: on macOS this
+single switch also covers system audio. Without it macOS hands the app perfect silence, and it says so in the log.
 
-Notes:
-- The volume keys do not work with a Multi-Output Device; change volume on the real device in Audio MIDI Setup or in the call app.
-- Your microphone is **not** captured: the app only reads BlackHole, which receives what is played to the speakers.
-- On first run macOS asks the terminal for **microphone permission** (it applies to any audio input, BlackHole included). Allow it in System Settings → Privacy & Security → Microphone.
+The helper that does the capture (`audiotap/`, ~130 lines of Swift) is built automatically on first run;
+it needs the Xcode command line tools (`xcode-select --install`). Build it by hand with `audiotap/build.sh`.
+
+## 2. Alternative: BlackHole (AUDIO_SOURCE=device)
+
+Only needed if the permission above is not an option, or on macOS older than 14.2. Downside: with a
+Multi-Output Device the volume keys stop working.
+
+1. `brew install blackhole-2ch`, then `sudo killall coreaudiod` (or reboot).
+2. Open **Audio MIDI Setup**: `open -a "Audio MIDI Setup"`. If you see the MIDI Studio window, switch with
+   **Window → Show Audio Devices** (⌘1).
+3. **+** in the bottom-left → **Create Multi-Output Device**.
+4. Tick your real output (e.g. **MacBook Pro Speakers**) **and** **BlackHole 2ch**; make the real output the
+   **Primary Device** and enable **Drift Correction** for BlackHole.
+5. **System Settings → Sound → Output** → choose the **Multi-Output Device** (not BlackHole itself — then you
+   would hear nothing). Quick switch: ⌥ Option-click the volume icon in the menu bar.
+6. Run with `AUDIO_SOURCE=device`.
+
+In both cases your **microphone is not captured**: only what is played to the speakers.
 
 ## 3. Python environment
 
@@ -61,7 +71,8 @@ Defaults live in `config.py`.
 
 | Variable | Default | Meaning |
 |---|---|---|
-| `INPUT_DEVICE` | `BlackHole` | Input device name substring or index (`python main.py --list-devices`) |
+| `AUDIO_SOURCE` | `tap` | `tap`: capture what the Mac plays; `device`: capture from an input device (BlackHole) |
+| `INPUT_DEVICE` | `BlackHole` | Input device name substring or index, with `AUDIO_SOURCE=device` (`python main.py --list-devices`) |
 | `SILENCE_THRESHOLD` | `0.003` | Audio quieter than this (RMS) is never treated as speech |
 | `PARTIAL_STEP_SECONDS` | `0.4` | How often the line being spoken is updated |
 | `PAUSE_SECONDS` | `0.6` | A pause this long finalises the line |
@@ -104,7 +115,7 @@ python main.py -v               # debug logging (latency of every update)
 
 Stop with **Ctrl+C**.
 
-Quick check without a call: play an English YouTube video with the Multi-Output Device selected
+Quick check without a call: play an English YouTube video
 and run `python main.py` — the translation appears ~1.5 s after the speaker starts talking.
 
 ## License

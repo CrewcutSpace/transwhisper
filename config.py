@@ -19,7 +19,10 @@ def _flag(name: str, default: bool) -> bool:
 
 
 # --- Audio capture ---------------------------------------------------------
-# Substring of the input device name, or its numeric index.
+# tap: capture what the Mac plays directly (needs the system audio recording permission).
+# device: capture from an input device such as BlackHole (needs a Multi-Output Device).
+AUDIO_SOURCE = _get("AUDIO_SOURCE", "tap").lower()
+# Substring of the input device name, or its numeric index. Only used with AUDIO_SOURCE=device.
 INPUT_DEVICE = _get("INPUT_DEVICE", "BlackHole")
 # Audio quieter than this (RMS) is never treated as speech; filters out digital silence and hiss.
 SILENCE_THRESHOLD = float(_get("SILENCE_THRESHOLD", "0.003"))

@@ -1,7 +1,12 @@
-"""System audio capture from a virtual input device (BlackHole)."""
+"""Audio capture: either straight from what the Mac plays (Core Audio process tap, no extra
+setup) or from a virtual input device such as BlackHole."""
 
+import json
 import queue
+import shutil
+import subprocess
 import threading
+from pathlib import Path
 
 import numpy as np
 import sounddevice as sd
@@ -10,8 +15,23 @@ from loguru import logger
 WHISPER_RATE = 16000
 BLOCK_SECONDS = 0.1
 
+TAP_DIR = Path(__file__).resolve().parent / "audiotap"
+TAP_BINARY = TAP_DIR / "audiotap"
+
+PERMISSION_HINT = (
+    "macOS is not letting this app hear the system audio.\n"
+    "Fix: System Settings -> Privacy & Security -> Screen & System Audio Recording -> "
+    "enable your terminal (iTerm/Terminal), then restart the terminal.\n"
+    "(The permission is named after screen recording, but it also covers system audio.)\n"
+    "Alternative: set AUDIO_SOURCE=device to capture via BlackHole instead."
+)
+
 
 class DeviceNotFoundError(RuntimeError):
+    pass
+
+
+class TapUnavailableError(RuntimeError):
     pass
 
 
@@ -61,8 +81,81 @@ def to_whisper_format(frames: np.ndarray, rate: int) -> np.ndarray:
     return np.interp(positions, np.arange(len(mono)), mono).astype(np.float32)
 
 
+def build_tap() -> Path:
+    """Compile the small Swift helper that taps the system audio."""
+    if TAP_BINARY.exists() and TAP_BINARY.stat().st_mtime >= (TAP_DIR / "main.swift").stat().st_mtime:
+        return TAP_BINARY
+    if not shutil.which("swiftc"):
+        raise TapUnavailableError(
+            "swiftc not found, so the system audio helper cannot be built.\n"
+            "Fix: install the Xcode command line tools (xcode-select --install), "
+            "or set AUDIO_SOURCE=device to capture via BlackHole."
+        )
+    logger.info("Building the system audio helper (one time)...")
+    build = subprocess.run([str(TAP_DIR / "build.sh")], capture_output=True, text=True)
+    if build.returncode != 0 or not TAP_BINARY.exists():
+        raise TapUnavailableError(f"Could not build the system audio helper:\n{build.stdout}{build.stderr}")
+    return TAP_BINARY
+
+
+class SystemAudioCapture:
+    """Captures whatever the Mac is playing, through the Swift helper. No virtual device,
+    no Multi-Output Device, and the volume keys keep working."""
+
+    name = "system audio"
+
+    def __init__(self, out: queue.Queue):
+        self.out = out
+        self._process: subprocess.Popen | None = None
+        self._worker: threading.Thread | None = None
+        self._stop = threading.Event()
+
+    def _read(self, rate: int):
+        block_bytes = int(rate * BLOCK_SECONDS) * 4  # float32 mono
+        silent_blocks = 0
+        warned = False
+        assert self._process is not None and self._process.stdout is not None
+        while not self._stop.is_set():
+            data = self._process.stdout.read(block_bytes)
+            if not data:
+                break
+            block = np.frombuffer(data, dtype=np.float32)
+            if not warned:
+                # Without the permission macOS delivers a stream of perfect silence.
+                silent_blocks = silent_blocks + 1 if not np.any(block) else 0
+                if silent_blocks > 5 / BLOCK_SECONDS:
+                    logger.warning(PERMISSION_HINT)
+                    warned = True
+            self.out.put(to_whisper_format(block, rate))
+
+    def start(self):
+        binary = build_tap()
+        self._process = subprocess.Popen([str(binary)], stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        header = self._process.stdout.readline()
+        if not header:
+            error = self._process.stderr.read().decode().strip()
+            raise TapUnavailableError(error or PERMISSION_HINT)
+        rate = int(json.loads(header)["rate"])
+        self._worker = threading.Thread(target=self._read, args=(rate,), name="audio-tap", daemon=True)
+        self._worker.start()
+        logger.info("Capturing the system audio @ {} Hz (no BlackHole needed)", rate)
+
+    def stop(self):
+        self._stop.set()
+        if self._process is not None:
+            self._process.terminate()
+            try:
+                self._process.wait(timeout=2)
+            except subprocess.TimeoutExpired:
+                self._process.kill()
+        if self._worker is not None:
+            self._worker.join(timeout=1)
+
+
 class AudioCapture:
     """Reads the input device and pushes short 16 kHz mono blocks into a queue."""
+
+    name = "input device"
 
     def __init__(self, device: int, out: queue.Queue):
         info = sd.query_devices(device)
