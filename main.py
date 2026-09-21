@@ -1,6 +1,7 @@
 """Entry point: audio -> live transcription -> translation -> overlay + stdout."""
 
 import argparse
+import contextlib
 import logging
 import queue
 import signal
@@ -39,6 +40,25 @@ def play_file(path: str, out: queue.Queue):
 
 
 MIN_CLAUSE_WORDS = 4
+SENTENCE_ENDINGS = (".", "!", "?", "…")
+
+
+def _continuation(previous: str, part: str) -> str:
+    """Clauses are translated on their own, so one from the middle of a sentence usually
+    comes back capitalised. Put it back in lower case."""
+    if not previous or not part or previous.rstrip().endswith(SENTENCE_ENDINGS) or not part[0].isupper():
+        return part
+    first = part.split()[0]
+    if len(first) > 1 and first.isupper():
+        return part  # an acronym, e.g. API
+    return part[0].lower() + part[1:]
+
+
+def _join_clauses(parts: list[str]) -> str:
+    text = ""
+    for part in parts:
+        text = f"{text} {_continuation(text, part)}".strip()
+    return text
 
 
 def _find_unit_end(words: list[str], unit: list[str], start: int, slack: int = 3) -> int | None:
@@ -135,8 +155,8 @@ class Pipeline:
         for unit in units:
             source = " ".join(unit)
             self._frozen.append((source, self._translate(source, self._language)))
-        done_text = " ".join(translated for _, translated in self._frozen)
-        pending_text = self._translate(" ".join(tail), self._language, live=True) if tail else ""
+        done_text = _join_clauses([translated for _, translated in self._frozen])
+        pending_text = _continuation(done_text, self._translate(" ".join(tail), self._language, live=True)) if tail else ""
         original = " ".join(source for source, _ in self._frozen + [(" ".join(tail), "")]).strip()
 
         if not segment.final and (done_text, pending_text) == self._shown:
@@ -227,11 +247,15 @@ def run(args) -> int:
 
     # 2. Translation backends: one for the text that stays, a cheap one for the live line
     translator = create_translator(config.TRANSLATE_BACKEND, config.TARGET_LANG, config.DEEPL_API_KEY, config.ARGOS_DIR)
+    live_backend = config.LIVE_BACKEND
+    if live_backend == "auto":
+        # DeepL bills per character and the live line is re-translated twice a second.
+        live_backend = "argos" if translator.name == "deepl" else "same"
     live_translator = translator
-    if config.LIVE_BACKEND == "off":
+    if live_backend == "off":
         live_translator = None
-    elif translator.name != "argos" and config.LIVE_BACKEND == "argos":
-        live_translator = create_translator("argos", config.TARGET_LANG, "", config.ARGOS_DIR)
+    elif live_backend not in ("same", translator.name):
+        live_translator = create_translator(live_backend, config.TARGET_LANG, "", config.ARGOS_DIR)
     if config.SOURCE_LANG != "auto":
         try:
             translator.prepare(config.SOURCE_LANG)
@@ -295,9 +319,15 @@ def run(args) -> int:
     except KeyboardInterrupt:
         pass
     finally:
-        if capture:
-            capture.stop()
-        pipeline.stop()
+        # Ctrl+C can land again while we are already shutting down.
+        with contextlib.suppress(KeyboardInterrupt):
+            if capture:
+                capture.stop()
+            pipeline.stop()
+            for backend in (translator, live_translator):
+                close = getattr(backend, "close", None)
+                if close:
+                    close()
         logger.info("Stopped.")
     return 0
 
@@ -325,7 +355,10 @@ def main() -> int:
         for i, name in list_input_devices():
             print(f"[{i}] {name}")
         return 0
-    return run(args)
+    try:
+        return run(args)
+    except KeyboardInterrupt:
+        return 0
 
 
 if __name__ == "__main__":

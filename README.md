@@ -85,8 +85,8 @@ Defaults live in `config.py`.
 | `WHISPER_THREADS` | `8` | CPU threads for Whisper |
 | `SOURCE_LANG` | `en` | Language spoken in the call, or `auto` to detect it per line |
 | `TARGET_LANG` | `uk` | Language to translate into (`de`, `pl`, `es`, ...) |
-| `TRANSLATE_BACKEND` | `argos`, or `deepl` if a key is set | Translation backend for the text that stays |
-| `LIVE_BACKEND` | `argos` | Backend for the line still being spoken: `argos` (free), `same`, `off` |
+| `TRANSLATE_BACKEND` | `apple`, or `deepl` if a key is set | Translation backend: `apple` (macOS), `argos`, `deepl` |
+| `LIVE_BACKEND` | `auto` | Backend for the line still being spoken: `auto`, `same`, `argos`, `apple`, `off` |
 | `DEEPL_API_KEY` | — | DeepL API key (free tier), only from env/.env |
 | `ARGOS_DIR` | `~/.local/share/transwhisper/argos` | Where Argos models are downloaded |
 | `MAX_ENTRIES` | `10` | Lines kept in the window |
@@ -96,7 +96,13 @@ Defaults live in `config.py`.
 
 ### Translation backends
 
-- **Argos** (default, no key needed): runs fully offline on your Mac. The model for the language pair (~70–100 MB)
+- **macOS** (`apple`, the default): the translator built into macOS — free, offline, no key, no quota, and clearly
+  better than Argos (~90 ms per sentence). Install the language pair once in **System Settings → General →
+  Language & Region → Translation Languages**; an app without a window cannot start that download, so the app
+  says so and falls back to Argos if the pair is missing. Needs macOS 15+ and the Xcode command line tools.
+  The helper (`appletranslate/`) is built on first run. With `SOURCE_LANG=auto` the language Whisper reports for
+  each line is used; a pair whose language pack is missing falls back to the text being left untranslated.
+- **Argos** (`argos`, no key needed): local models, weaker quality. The model for the language pair (~70–100 MB)
   is downloaded on first run. If there is no direct model for a pair, it translates through English.
 - **DeepL** (better quality, needs internet): create a free API account at <https://www.deepl.com/pro-api>
   (Developer plan: a **one-time** credit of 1 000 000 characters, no monthly reset), copy the key from
