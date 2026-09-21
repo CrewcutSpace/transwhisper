@@ -48,11 +48,13 @@ SOURCE_LANG = _get("SOURCE_LANG", "en").lower()
 # --- Translation -----------------------------------------------------------
 TARGET_LANG = _get("TARGET_LANG", "uk").lower()
 DEEPL_API_KEY = os.getenv("DEEPL_API_KEY", "").strip()
-# deepl | argos. Defaults to deepl only when a key is present.
-TRANSLATE_BACKEND = _get("TRANSLATE_BACKEND", "deepl" if DEEPL_API_KEY else "argos").lower()
+# apple: the translator built into macOS (free, offline, best quality of the free options)
+# argos: local models, weaker | deepl: best quality, needs a key and has a character quota
+TRANSLATE_BACKEND = _get("TRANSLATE_BACKEND", "deepl" if DEEPL_API_KEY else "apple").lower()
 # Backend for the grey line that is still being spoken: it is re-translated twice a second,
-# so with DeepL that would burn the character quota ~4x faster. argos | same | off
-LIVE_BACKEND = _get("LIVE_BACKEND", "argos").lower()
+# which would burn DeepL's character quota ~4x faster. auto | same | argos | apple | off
+# auto = the main backend, unless that is DeepL, in which case local Argos.
+LIVE_BACKEND = _get("LIVE_BACKEND", "auto").lower()
 # Where downloaded Argos models are stored.
 ARGOS_DIR = Path(_get("ARGOS_DIR", str(Path.home() / ".local/share/transwhisper/argos"))).expanduser()
 

@@ -3,6 +3,7 @@
 import json
 import re
 import shutil
+import subprocess
 import urllib.request
 import zipfile
 from pathlib import Path
@@ -169,6 +170,81 @@ class ArgosTranslator:
         return text
 
 
+# --- macOS (Apple Translation framework) -----------------------------------
+
+APPLE_DIR = Path(__file__).resolve().parent / "appletranslate"
+APPLE_BINARY = APPLE_DIR / "appletranslate"
+
+APPLE_INSTALL_HINT = (
+    "The macOS translator does not have this language pair installed.\n"
+    "Fix: System Settings -> General -> Language & Region -> Translation Languages -> add the languages "
+    "(an app without a window cannot start that download).\n"
+    "Alternative: TRANSLATE_BACKEND=argos (offline, weaker) or TRANSLATE_BACKEND=deepl with DEEPL_API_KEY."
+)
+
+
+class AppleTranslator:
+    """The translator built into macOS: free, offline, no API key. Runs in a small Swift
+    helper because the framework has no Python bindings."""
+
+    name = "apple"
+
+    def __init__(self, target: str):
+        self.target = target
+        self._build()
+        self._process = subprocess.Popen(
+            [str(APPLE_BINARY)], stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True
+        )
+        if not (self._process.stdout and self._process.stdout.readline()):
+            error = self._process.stderr.read().strip() if self._process.stderr else ""
+            raise TranslationError(f"The macOS translator helper did not start: {error}")
+
+    @staticmethod
+    def _build():
+        source = APPLE_DIR / "main.swift"
+        if APPLE_BINARY.exists() and APPLE_BINARY.stat().st_mtime >= source.stat().st_mtime:
+            return
+        if not shutil.which("swiftc"):
+            raise TranslationError(
+                "swiftc not found, so the macOS translator helper cannot be built.\n"
+                "Fix: xcode-select --install, or use TRANSLATE_BACKEND=argos."
+            )
+        logger.info("Building the macOS translator helper (one time)...")
+        build = subprocess.run([str(APPLE_DIR / "build.sh")], capture_output=True, text=True)
+        if build.returncode != 0 or not APPLE_BINARY.exists():
+            raise TranslationError(f"Could not build the macOS translator helper:\n{build.stdout}{build.stderr}")
+
+    def prepare(self, source: str) -> None:
+        self.translate("Hello, this is a test.", source)
+
+    def close(self) -> None:
+        if self._process.poll() is None:
+            self._process.terminate()
+            try:
+                self._process.wait(timeout=2)
+            except subprocess.TimeoutExpired:
+                self._process.kill()
+
+    def translate(self, text: str, source: str) -> str:
+        if source == self.target:
+            return text
+        request = json.dumps({"text": text, "source": source, "target": self.target})
+        try:
+            self._process.stdin.write(request + "\n")
+            self._process.stdin.flush()
+            answer = self._process.stdout.readline()
+        except (OSError, ValueError) as exc:
+            raise TranslationError(f"The macOS translator helper stopped responding: {exc}") from exc
+        if not answer:
+            raise TranslationError("The macOS translator helper stopped unexpectedly")
+        reply = json.loads(answer)
+        if "error" in reply:
+            if "notInstalled" in reply["error"]:
+                raise TranslationError(APPLE_INSTALL_HINT)
+            raise TranslationError(f"The macOS translator failed: {reply['error']}")
+        return reply.get("text", "")
+
+
 # --- DeepL -----------------------------------------------------------------
 
 # DeepL requires a regional variant for some target languages.
@@ -214,7 +290,12 @@ class DeepLTranslator:
 
 
 def create_translator(backend: str, target: str, api_key: str, argos_dir: Path) -> Translator:
-    if backend == "deepl":
+    if backend == "apple":
+        try:
+            return AppleTranslator(target)
+        except TranslationError as exc:
+            logger.warning("{}\nFalling back to local Argos.", exc)
+    elif backend == "deepl":
         if not api_key:
             logger.warning("TRANSLATE_BACKEND=deepl but DEEPL_API_KEY is not set, falling back to local Argos")
         else:
