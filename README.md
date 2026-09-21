@@ -85,7 +85,8 @@ Defaults live in `config.py`.
 | `WHISPER_THREADS` | `8` | CPU threads for Whisper |
 | `SOURCE_LANG` | `en` | Language spoken in the call, or `auto` to detect it per line |
 | `TARGET_LANG` | `uk` | Language to translate into (`de`, `pl`, `es`, ...) |
-| `TRANSLATE_BACKEND` | `argos`, or `deepl` if a key is set | Translation backend |
+| `TRANSLATE_BACKEND` | `argos`, or `deepl` if a key is set | Translation backend for the text that stays |
+| `LIVE_BACKEND` | `argos` | Backend for the line still being spoken: `argos` (free), `same`, `off` |
 | `DEEPL_API_KEY` | — | DeepL API key (free tier), only from env/.env |
 | `ARGOS_DIR` | `~/.local/share/transwhisper/argos` | Where Argos models are downloaded |
 | `MAX_ENTRIES` | `10` | Lines kept in the window |
@@ -98,15 +99,20 @@ Defaults live in `config.py`.
 - **Argos** (default, no key needed): runs fully offline on your Mac. The model for the language pair (~70–100 MB)
   is downloaded on first run. If there is no direct model for a pair, it translates through English.
 - **DeepL** (better quality, needs internet): create a free API account at <https://www.deepl.com/pro-api>
-  (Free plan, 500 000 characters/month), copy the key from *Account → API Keys* and put it into `.env`:
+  (Developer plan: a **one-time** credit of 1 000 000 characters, no monthly reset), copy the key from
+  *Account → API Keys* and put it into `.env`:
 
   ```sh
   DEEPL_API_KEY=your-key:fx
   ```
 
   With a key present DeepL is used automatically. If the key is missing or invalid the app falls back to Argos.
-  Note that with DeepL the call transcript is sent to DeepL's servers, and live updates re-translate the current
-  unfinished clause on every update, which uses the character quota faster than final lines alone.
+  Note that with DeepL the call transcript is sent to DeepL's servers.
+
+  To stretch the one-time credit, the grey line that is still being spoken is translated by local Argos and only
+  finished clauses go to DeepL (`LIVE_BACKEND`). Measured on a test recording: ~890 characters per minute of
+  speech, so 1 000 000 characters last roughly **19 hours** of talking. Translating the live line with DeepL too
+  (`LIVE_BACKEND=same`) costs ~3 500 characters per minute, about 4.7 hours.
 
 ## 5. Run
 

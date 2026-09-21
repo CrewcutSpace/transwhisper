@@ -50,6 +50,9 @@ TARGET_LANG = _get("TARGET_LANG", "uk").lower()
 DEEPL_API_KEY = os.getenv("DEEPL_API_KEY", "").strip()
 # deepl | argos. Defaults to deepl only when a key is present.
 TRANSLATE_BACKEND = _get("TRANSLATE_BACKEND", "deepl" if DEEPL_API_KEY else "argos").lower()
+# Backend for the grey line that is still being spoken: it is re-translated twice a second,
+# so with DeepL that would burn the character quota ~4x faster. argos | same | off
+LIVE_BACKEND = _get("LIVE_BACKEND", "argos").lower()
 # Where downloaded Argos models are stored.
 ARGOS_DIR = Path(_get("ARGOS_DIR", str(Path.home() / ".local/share/transwhisper/argos"))).expanduser()
 

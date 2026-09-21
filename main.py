@@ -56,18 +56,20 @@ def _find_unit_end(words: list[str], unit: list[str], start: int, slack: int = 3
 
 
 class Pipeline:
-    def __init__(self, blocks: queue.Queue, segmenter: Segmenter, transcriber, translator, on_entry):
+    def __init__(self, blocks: queue.Queue, segmenter: Segmenter, transcriber, translator, live_translator, on_entry):
         self.blocks = blocks
         self.segmenter = segmenter
         self.transcriber = transcriber
         self.translator = translator
+        # The line still being spoken may use a cheaper backend; see config.LIVE_BACKEND.
+        self.live_translator = live_translator
         self.on_entry = on_entry
         self.stopped = threading.Event()
         self._failed_sources: set[str] = set()
         self._shown_partial = False
         self._last_audio_at = time.monotonic()
         self.stable = StableText()
-        self._cache: dict[tuple[str, str], str] = {}
+        self._cache: dict[tuple[str, str, str], str] = {}
         # Current line: (source, translation) units already frozen on screen.
         self._frozen: list[tuple[str, str]] = []
         self._shown = ("", "")
@@ -93,14 +95,17 @@ class Pipeline:
             except queue.Empty:
                 return True
 
-    def _translate(self, text: str, language: str) -> str:
+    def _translate(self, text: str, language: str, live: bool = False) -> str:
         """Translate one sentence. Cached, so a sentence already on screen keeps exactly the
         same translation when it is shown again (and DeepL is not billed twice)."""
-        key = (language, " ".join(normalize_word(w) for w in text.split()))
+        translator = self.live_translator if live else self.translator
+        if translator is None:
+            return ""
+        key = (translator.name, language, " ".join(normalize_word(w) for w in text.split()))
         if key in self._cache:
             return self._cache[key]
         try:
-            translated = self.translator.translate(text, language)
+            translated = translator.translate(text, language)
         except TranslationError as exc:
             if language not in self._failed_sources:
                 logger.error("{}", exc)
@@ -131,7 +136,7 @@ class Pipeline:
             source = " ".join(unit)
             self._frozen.append((source, self._translate(source, self._language)))
         done_text = " ".join(translated for _, translated in self._frozen)
-        pending_text = self._translate(" ".join(tail), self._language) if tail else ""
+        pending_text = self._translate(" ".join(tail), self._language, live=True) if tail else ""
         original = " ".join(source for source, _ in self._frozen + [(" ".join(tail), "")]).strip()
 
         if not segment.final and (done_text, pending_text) == self._shown:
@@ -220,15 +225,26 @@ def run(args) -> int:
             logger.error("{}", exc)
             return 1
 
-    # 2. Translation backend
+    # 2. Translation backends: one for the text that stays, a cheap one for the live line
     translator = create_translator(config.TRANSLATE_BACKEND, config.TARGET_LANG, config.DEEPL_API_KEY, config.ARGOS_DIR)
+    live_translator = translator
+    if config.LIVE_BACKEND == "off":
+        live_translator = None
+    elif translator.name != "argos" and config.LIVE_BACKEND == "argos":
+        live_translator = create_translator("argos", config.TARGET_LANG, "", config.ARGOS_DIR)
     if config.SOURCE_LANG != "auto":
         try:
             translator.prepare(config.SOURCE_LANG)
+            if live_translator is not None and live_translator is not translator:
+                live_translator.prepare(config.SOURCE_LANG)
         except TranslationError as exc:
             logger.error("{}", exc)
             return 1
-    logger.info("Translation backend ready: {} ({} -> {})", translator.name, config.SOURCE_LANG, config.TARGET_LANG)
+    logger.info(
+        "Translation ready: {} for finished text, {} for the live line ({} -> {})",
+        translator.name, live_translator.name if live_translator else "none",
+        config.SOURCE_LANG, config.TARGET_LANG,
+    )
 
     # 3. Whisper
     logger.info("Loading Whisper model '{}' (first run downloads it)...", config.MODEL_SIZE)
@@ -246,7 +262,10 @@ def run(args) -> int:
         overlay.show()
 
     segmenter = Segmenter(config.PARTIAL_STEP_SECONDS, config.PAUSE_SECONDS, config.MAX_SEGMENT_SECONDS, config.SILENCE_THRESHOLD)
-    pipeline = Pipeline(blocks, segmenter, transcriber, translator, overlay.update_entry if overlay else lambda *_: None)
+    pipeline = Pipeline(
+        blocks, segmenter, transcriber, translator, live_translator,
+        overlay.update_entry if overlay else lambda *_: None,
+    )
 
     # 5. Start
     if args.file:
@@ -283,7 +302,7 @@ def run(args) -> int:
     return 0
 
 
-@logger.catch
+@logger.catch(exclude=KeyboardInterrupt)
 def main() -> int:
     parser = argparse.ArgumentParser(description="transwhisper: local real-time call translator")
     parser.add_argument("--list-devices", action="store_true", help="list audio input devices and exit")
