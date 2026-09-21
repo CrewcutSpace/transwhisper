@@ -11,8 +11,11 @@ with faster-whisper and shows a live translation into the language you pick.
 
 The window shows the last ~10 lines. The line being spoken appears after ~1.5 s. A word is shown only once it has been
 recognised the same way twice, so shown text does not jump around. Each finished sentence or clause is translated
-once and stays fixed (white); only the part still being spoken is updated (grey). The window stays on top, does not take focus from the call,
-and can be dragged with the mouse. Final lines (original + translation) are also printed to stdout.
+once and stays fixed (white); only the part still being spoken is updated (grey).
+
+The window stays on top of everything, **including apps in full screen** (Meet in full screen, Zoom, Keynote), in every
+Space, and never takes focus away from the call. Drag it anywhere with the mouse: the position is remembered for the
+next run (in `~/.local/share/transwhisper/overlay.json`). Final lines (original + translation) are also printed to stdout.
 
 ## 1. Allow system audio recording
 
