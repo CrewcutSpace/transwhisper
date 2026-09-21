@@ -4,16 +4,19 @@ import ctypes
 import ctypes.util
 import html
 import json
+import subprocess
 from pathlib import Path
 
 from loguru import logger
-from PySide6.QtCore import QObject, Qt, Signal
+from PySide6.QtCore import QObject, QRect, Qt, QTimer, Signal
 from PySide6.QtGui import QGuiApplication
 from PySide6.QtWidgets import QApplication, QLabel, QScrollArea, QVBoxLayout, QWidget
 
 WIDTH = 420
 MARGIN = 16
+GAP = 8
 STATE_FILE = Path.home() / ".local/share/transwhisper/overlay.json"
+TAP_BINARY = Path(__file__).resolve().parent / "audiotap" / "audiotap"
 
 # NSWindowCollectionBehavior: show the window in every Space, including the one a
 # full-screen app (Meet in full screen, Zoom, Keynote) creates for itself.
@@ -22,22 +25,62 @@ STATIONARY = 1 << 4
 FULL_SCREEN_AUXILIARY = 1 << 8
 # NSStatusWindowLevel: above the full-screen app's own window.
 STATUS_WINDOW_LEVEL = 25
+# NSApplicationActivationPolicyAccessory: no Dock icon, and allowed to float over full-screen apps.
+ACCESSORY_POLICY = 1
 
 
-def _show_over_fullscreen_apps(widget: QWidget):
-    """Qt cannot set this, so talk to the underlying NSWindow directly."""
+class _ObjC:
+    """Just enough of the Objective-C runtime to configure the native window."""
+
+    def __init__(self):
+        self.lib = ctypes.cdll.LoadLibrary(ctypes.util.find_library("objc"))
+        self.lib.sel_registerName.restype = ctypes.c_void_p
+        self.lib.objc_getClass.restype = ctypes.c_void_p
+        self.lib.objc_msgSend.restype = ctypes.c_void_p
+        self.lib.objc_msgSend.argtypes = [ctypes.c_void_p, ctypes.c_void_p]
+
+    def send(self, target, selector: bytes):
+        return self.lib.objc_msgSend(ctypes.c_void_p(target), self.lib.sel_registerName(selector))
+
+    def send_long(self, target, selector: bytes, value: int):
+        function = ctypes.cast(
+            self.lib.objc_msgSend, ctypes.CFUNCTYPE(None, ctypes.c_void_p, ctypes.c_void_p, ctypes.c_long)
+        )
+        function(ctypes.c_void_p(target), self.lib.sel_registerName(selector), value)
+
+    def shared_app(self):
+        return self.send(self.lib.objc_getClass(b"NSApplication"), b"sharedApplication")
+
+
+def _configure_native_window(widget: QWidget):
+    """Qt cannot express this, so talk to the underlying NSWindow (and NSApp) directly."""
     try:
-        objc = ctypes.cdll.LoadLibrary(ctypes.util.find_library("objc"))
-        objc.sel_registerName.restype = ctypes.c_void_p
-        objc.objc_msgSend.restype = ctypes.c_void_p
-        objc.objc_msgSend.argtypes = [ctypes.c_void_p, ctypes.c_void_p]
-        window = objc.objc_msgSend(ctypes.c_void_p(int(widget.winId())), objc.sel_registerName(b"window"))
-        send_long = ctypes.cast(objc.objc_msgSend, ctypes.CFUNCTYPE(None, ctypes.c_void_p, ctypes.c_void_p, ctypes.c_long))
-        send_long(window, objc.sel_registerName(b"setCollectionBehavior:"),
-                  CAN_JOIN_ALL_SPACES | STATIONARY | FULL_SCREEN_AUXILIARY)
-        send_long(window, objc.sel_registerName(b"setLevel:"), STATUS_WINDOW_LEVEL)
+        objc = _ObjC()
+        objc.send_long(objc.shared_app(), b"setActivationPolicy:", ACCESSORY_POLICY)
+        window = objc.send(int(widget.winId()), b"window")
+        objc.send_long(window, b"setCollectionBehavior:", CAN_JOIN_ALL_SPACES | STATIONARY | FULL_SCREEN_AUXILIARY)
+        objc.send_long(window, b"setLevel:", STATUS_WINDOW_LEVEL)
     except Exception as exc:  # not fatal: the window still works on the normal desktop
-        logger.warning("Could not make the window appear over full-screen apps: {}", exc)
+        logger.warning("Could not make the window float over full-screen apps: {}", exc)
+
+
+def find_window(patterns: str) -> dict | None:
+    """Ask the helper for the on-screen window of the call (e.g. the Chrome window with Meet)."""
+    if not TAP_BINARY.exists():
+        return None
+    for pattern in (p.strip() for p in patterns.split(",") if p.strip()):
+        try:
+            found = subprocess.run(
+                [str(TAP_BINARY), "--window", pattern], capture_output=True, text=True, timeout=5
+            )
+            window = json.loads(found.stdout or "{}")
+        except (OSError, ValueError, subprocess.TimeoutExpired) as exc:
+            logger.debug("Window lookup for {!r} failed: {}", pattern, exc)
+            continue
+        if window.get("width"):
+            logger.info("Placing the window next to: {} — {}", window["owner"], window["title"])
+            return window
+    return None
 
 
 class _Bridge(QObject):
@@ -47,7 +90,7 @@ class _Bridge(QObject):
 
 
 class Overlay(QWidget):
-    def __init__(self, max_entries: int, opacity: float, show_original: bool):
+    def __init__(self, max_entries: int, opacity: float, show_original: bool, follow_window: str = ""):
         super().__init__(
             None,
             Qt.WindowType.Tool
@@ -90,27 +133,50 @@ class Overlay(QWidget):
         layout.setContentsMargins(0, 0, 0, 0)
         layout.addWidget(self._scroll)
 
-        self._restore_geometry()
+        self._place(follow_window)
 
     def show(self):
         super().show()
-        _show_over_fullscreen_apps(self)
+        _configure_native_window(self)
+        # Qt resets the native window when it is re-created (screen change, Space switch),
+        # so keep re-applying: the call is cheap.
+        self._keep_floating = QTimer(self)
+        self._keep_floating.timeout.connect(lambda: _configure_native_window(self))
+        self._keep_floating.start(2000)
 
     # --- placement ---------------------------------------------------------
 
-    def _restore_geometry(self):
+    def _place(self, follow_window: str):
+        call = find_window(follow_window) if follow_window else None
+        if call:
+            self.setGeometry(self._beside(QRect(call["x"], call["y"], call["width"], call["height"])))
+            return
+        if self._restore_geometry():
+            return
+        screen = QGuiApplication.primaryScreen().availableGeometry()
+        self.setGeometry(screen.right() - WIDTH - MARGIN, screen.top() + MARGIN, WIDTH, screen.height() - 2 * MARGIN)
+
+    def _beside(self, call: QRect) -> QRect:
+        """Right next to the call window: outside it if there is room, otherwise along its right edge."""
+        screen = QGuiApplication.screenAt(call.center()) or QGuiApplication.primaryScreen()
+        area = screen.availableGeometry()
+        height = min(call.height() - 2 * GAP, area.height() - 2 * GAP)
+        top = max(area.top() + GAP, min(call.top() + GAP, area.bottom() - height - GAP))
+        if area.right() - call.right() >= WIDTH + 2 * GAP:
+            return QRect(call.right() + GAP, top, WIDTH, height)
+        return QRect(min(call.right(), area.right()) - WIDTH - GAP, top, WIDTH, height)
+
+    def _restore_geometry(self) -> bool:
         """Reuse wherever the window was dragged to last time."""
         try:
             saved = json.loads(STATE_FILE.read_text())
             screen = QGuiApplication.primaryScreen().availableGeometry()
             if screen.contains(saved["x"] + 40, saved["y"] + 40):
                 self.setGeometry(saved["x"], saved["y"], saved["width"], saved["height"])
-                return
+                return True
         except (OSError, ValueError, KeyError):
             pass
-        screen = QGuiApplication.primaryScreen().availableGeometry()
-        height = screen.height() - 2 * MARGIN
-        self.setGeometry(screen.right() - WIDTH - MARGIN, screen.top() + MARGIN, WIDTH, height)
+        return False
 
     def _save_geometry(self):
         rect = self.geometry()

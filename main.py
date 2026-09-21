@@ -242,7 +242,7 @@ def run(args) -> int:
         from overlay import Overlay, create_app
 
         app = create_app()
-        overlay = Overlay(config.MAX_ENTRIES, config.OVERLAY_OPACITY, config.SHOW_ORIGINAL)
+        overlay = Overlay(config.MAX_ENTRIES, config.OVERLAY_OPACITY, config.SHOW_ORIGINAL, config.FOLLOW_WINDOW)
         overlay.show()
 
     segmenter = Segmenter(config.PARTIAL_STEP_SECONDS, config.PAUSE_SECONDS, config.MAX_SEGMENT_SECONDS, config.SILENCE_THRESHOLD)

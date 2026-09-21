@@ -36,9 +36,9 @@ PAUSE_SECONDS = float(_get("PAUSE_SECONDS", "0.6"))
 MAX_SEGMENT_SECONDS = float(_get("MAX_SEGMENT_SECONDS", "12"))
 
 # --- Transcription (faster-whisper) ----------------------------------------
-# base: ~0.3 s per update (default) | small: ~0.7 s, more accurate | medium: slow.
+# small: ~0.7 s per update, accurate (default) | base: ~0.3 s, mishears more | medium: slow.
 # For English the English-only variant (base.en, ...) is picked automatically.
-MODEL_SIZE = _get("MODEL_SIZE", "base")
+MODEL_SIZE = _get("MODEL_SIZE", "small")
 WHISPER_DEVICE = _get("WHISPER_DEVICE", "cpu")
 WHISPER_COMPUTE_TYPE = _get("WHISPER_COMPUTE_TYPE", "int8")
 WHISPER_THREADS = int(_get("WHISPER_THREADS", "8"))
@@ -56,5 +56,7 @@ ARGOS_DIR = Path(_get("ARGOS_DIR", str(Path.home() / ".local/share/transwhisper/
 # --- Overlay ---------------------------------------------------------------
 MAX_ENTRIES = int(_get("MAX_ENTRIES", "10"))
 OVERLAY_OPACITY = float(_get("OVERLAY_OPACITY", "0.85"))
+# Window(s) to sit next to at startup, matched against title/app name (comma separated).
+FOLLOW_WINDOW = _get("FOLLOW_WINDOW", "Meet,Zoom,Teams")
 # Show the original (e.g. English) text above the translation.
 SHOW_ORIGINAL = _flag("SHOW_ORIGINAL", False)

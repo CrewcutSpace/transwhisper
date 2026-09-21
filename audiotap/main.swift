@@ -6,6 +6,7 @@
 
 import AudioToolbox
 import CoreAudio
+import CoreGraphics
 import Foundation
 
 func fail(_ message: String) -> Never {
@@ -35,6 +36,43 @@ func defaultOutputDeviceUID() -> String {
     check(AudioObjectGetPropertyData(device, &address, 0, nil, &size, &uid), "reading the output device UID")
     guard let uid else { fail("the output device has no UID") }
     return uid.takeRetainedValue() as String
+}
+
+// Optional mode: --window <substring> prints the bounds of the matching on-screen window
+// (used to place the overlay next to the call window). Needs the same permission as the tap.
+if let index = CommandLine.arguments.firstIndex(of: "--window"), index + 1 < CommandLine.arguments.count {
+    let wanted = CommandLine.arguments[index + 1].lowercased()
+    // .optionAll, not .optionOnScreenOnly: a full-screen Meet lives in its own Space and
+    // would not be listed while the app is started from a terminal in another Space.
+    let options: CGWindowListOption = [.optionAll, .excludeDesktopElements]
+    let windows = (CGWindowListCopyWindowInfo(options, kCGNullWindowID) as? [[String: Any]]) ?? []
+    var best: (CGRect, String, String)?
+    for window in windows {
+        guard (window[kCGWindowLayer as String] as? Int) == 0,
+              let boundsDict = window[kCGWindowBounds as String] as? NSDictionary,
+              let bounds = CGRect(dictionaryRepresentation: boundsDict),
+              bounds.width > 200, bounds.height > 200,  // skip tool windows and stray panels
+              ((window[kCGWindowAlpha as String] as? Double) ?? 1) > 0.1 else { continue }
+        let owner = (window[kCGWindowOwnerName as String] as? String) ?? ""
+        let title = (window[kCGWindowName as String] as? String) ?? ""
+        guard title.lowercased().contains(wanted) || owner.lowercased().contains(wanted) else { continue }
+        let area = bounds.width * bounds.height
+        if best == nil || area > best!.0.width * best!.0.height {
+            best = (bounds, owner, title)
+        }
+    }
+    guard let (bounds, owner, title) = best else {
+        print("{}")
+        exit(0)
+    }
+    let json: [String: Any] = [
+        "x": Int(bounds.origin.x), "y": Int(bounds.origin.y),
+        "width": Int(bounds.width), "height": Int(bounds.height),
+        "owner": owner, "title": title,
+    ]
+    let data = try! JSONSerialization.data(withJSONObject: json)
+    print(String(data: data, encoding: .utf8)!)
+    exit(0)
 }
 
 // 1. Tap everything the system plays, without muting it.
