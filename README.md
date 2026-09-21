@@ -13,9 +13,10 @@ The window shows the last ~10 lines. The line being spoken appears after ~1.5 s.
 recognised the same way twice, so shown text does not jump around. Each finished sentence or clause is translated
 once and stays fixed (white); only the part still being spoken is updated (grey).
 
-The window stays on top of everything, **including apps in full screen** (Meet in full screen, Zoom, Keynote), in every
-Space, and never takes focus away from the call. Drag it anywhere with the mouse: the position is remembered for the
-next run (in `~/.local/share/transwhisper/overlay.json`). Final lines (original + translation) are also printed to stdout.
+At startup the window places itself next to the call window (a Chrome window with Meet, Zoom, Teams — see
+`FOLLOW_WINDOW`), stays on top of everything **including apps in full screen**, in every Space, and never takes focus
+away from the call. Drag it anywhere with the mouse: that position is remembered for runs where no call window is
+found (`~/.local/share/transwhisper/overlay.json`). Final lines (original + translation) are also printed to stdout.
 
 ## 1. Allow system audio recording
 
@@ -80,7 +81,7 @@ Defaults live in `config.py`.
 | `PARTIAL_STEP_SECONDS` | `0.4` | How often the line being spoken is updated |
 | `PAUSE_SECONDS` | `0.6` | A pause this long finalises the line |
 | `MAX_SEGMENT_SECONDS` | `12` | Long speech without pauses is split at a short breath around this length |
-| `MODEL_SIZE` | `base` | Whisper model: `base` (~0.3 s per update), `small` (~0.7 s, more accurate), `medium` (slow). With `SOURCE_LANG=en` the English-only variant is used |
+| `MODEL_SIZE` | `small` | Whisper model: `small` (~0.7 s per update), `base` (~0.3 s, mishears more), `medium` (slow). With `SOURCE_LANG=en` the English-only variant is used |
 | `WHISPER_THREADS` | `8` | CPU threads for Whisper |
 | `SOURCE_LANG` | `en` | Language spoken in the call, or `auto` to detect it per line |
 | `TARGET_LANG` | `uk` | Language to translate into (`de`, `pl`, `es`, ...) |
@@ -89,6 +90,7 @@ Defaults live in `config.py`.
 | `ARGOS_DIR` | `~/.local/share/transwhisper/argos` | Where Argos models are downloaded |
 | `MAX_ENTRIES` | `10` | Lines kept in the window |
 | `OVERLAY_OPACITY` | `0.85` | Window opacity |
+| `FOLLOW_WINDOW` | `Meet,Zoom,Teams` | Window titles/apps to place the overlay next to at startup |
 | `SHOW_ORIGINAL` | `0` | `1` shows the original text above the translation |
 
 ### Translation backends
