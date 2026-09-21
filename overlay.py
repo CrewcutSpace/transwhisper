@@ -1,13 +1,43 @@
 """Always-on-top, semi-transparent side window with a rolling feed of translations."""
 
+import ctypes
+import ctypes.util
 import html
+import json
+from pathlib import Path
 
+from loguru import logger
 from PySide6.QtCore import QObject, Qt, Signal
 from PySide6.QtGui import QGuiApplication
 from PySide6.QtWidgets import QApplication, QLabel, QScrollArea, QVBoxLayout, QWidget
 
 WIDTH = 420
 MARGIN = 16
+STATE_FILE = Path.home() / ".local/share/transwhisper/overlay.json"
+
+# NSWindowCollectionBehavior: show the window in every Space, including the one a
+# full-screen app (Meet in full screen, Zoom, Keynote) creates for itself.
+CAN_JOIN_ALL_SPACES = 1 << 0
+STATIONARY = 1 << 4
+FULL_SCREEN_AUXILIARY = 1 << 8
+# NSStatusWindowLevel: above the full-screen app's own window.
+STATUS_WINDOW_LEVEL = 25
+
+
+def _show_over_fullscreen_apps(widget: QWidget):
+    """Qt cannot set this, so talk to the underlying NSWindow directly."""
+    try:
+        objc = ctypes.cdll.LoadLibrary(ctypes.util.find_library("objc"))
+        objc.sel_registerName.restype = ctypes.c_void_p
+        objc.objc_msgSend.restype = ctypes.c_void_p
+        objc.objc_msgSend.argtypes = [ctypes.c_void_p, ctypes.c_void_p]
+        window = objc.objc_msgSend(ctypes.c_void_p(int(widget.winId())), objc.sel_registerName(b"window"))
+        send_long = ctypes.cast(objc.objc_msgSend, ctypes.CFUNCTYPE(None, ctypes.c_void_p, ctypes.c_void_p, ctypes.c_long))
+        send_long(window, objc.sel_registerName(b"setCollectionBehavior:"),
+                  CAN_JOIN_ALL_SPACES | STATIONARY | FULL_SCREEN_AUXILIARY)
+        send_long(window, objc.sel_registerName(b"setLevel:"), STATUS_WINDOW_LEVEL)
+    except Exception as exc:  # not fatal: the window still works on the normal desktop
+        logger.warning("Could not make the window appear over full-screen apps: {}", exc)
 
 
 class _Bridge(QObject):
@@ -60,12 +90,37 @@ class Overlay(QWidget):
         layout.setContentsMargins(0, 0, 0, 0)
         layout.addWidget(self._scroll)
 
-        self._place_on_right_edge()
+        self._restore_geometry()
 
-    def _place_on_right_edge(self):
+    def show(self):
+        super().show()
+        _show_over_fullscreen_apps(self)
+
+    # --- placement ---------------------------------------------------------
+
+    def _restore_geometry(self):
+        """Reuse wherever the window was dragged to last time."""
+        try:
+            saved = json.loads(STATE_FILE.read_text())
+            screen = QGuiApplication.primaryScreen().availableGeometry()
+            if screen.contains(saved["x"] + 40, saved["y"] + 40):
+                self.setGeometry(saved["x"], saved["y"], saved["width"], saved["height"])
+                return
+        except (OSError, ValueError, KeyError):
+            pass
         screen = QGuiApplication.primaryScreen().availableGeometry()
         height = screen.height() - 2 * MARGIN
         self.setGeometry(screen.right() - WIDTH - MARGIN, screen.top() + MARGIN, WIDTH, height)
+
+    def _save_geometry(self):
+        rect = self.geometry()
+        try:
+            STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
+            STATE_FILE.write_text(json.dumps({"x": rect.x(), "y": rect.y(), "width": rect.width(), "height": rect.height()}))
+        except OSError as exc:
+            logger.debug("Could not save the window position: {}", exc)
+
+    # --- feed --------------------------------------------------------------
 
     def update_entry(self, original: str, done: str, pending: str, final: bool):
         """Thread-safe. `done` sentences will not change any more (white), `pending` is the
@@ -104,7 +159,8 @@ class Overlay(QWidget):
             item = self._feed.takeAt(1)
             item.widget().deleteLater()
 
-    # Frameless window: drag it with the mouse.
+    # --- dragging ----------------------------------------------------------
+
     def mousePressEvent(self, event):
         if event.button() == Qt.MouseButton.LeftButton:
             self._drag_offset = event.globalPosition().toPoint() - self.frameGeometry().topLeft()
@@ -114,7 +170,9 @@ class Overlay(QWidget):
             self.move(event.globalPosition().toPoint() - self._drag_offset)
 
     def mouseReleaseEvent(self, event):
-        self._drag_offset = None
+        if self._drag_offset is not None:
+            self._drag_offset = None
+            self._save_geometry()
 
 
 def create_app() -> QApplication:
