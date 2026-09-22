@@ -40,25 +40,52 @@ func defaultOutputDeviceUID() -> String {
 
 // Optional mode: --window <substring> prints the bounds of the matching on-screen window
 // (used to place the overlay next to the call window). Needs the same permission as the tap.
+if CommandLine.arguments.contains("--windows") {
+    let options: CGWindowListOption = [.optionAll, .excludeDesktopElements]
+    let windows = (CGWindowListCopyWindowInfo(options, kCGNullWindowID) as? [[String: Any]]) ?? []
+    let onScreen = Set(((CGWindowListCopyWindowInfo([.optionOnScreenOnly, .excludeDesktopElements], kCGNullWindowID)
+        as? [[String: Any]]) ?? []).compactMap { $0[kCGWindowNumber as String] as? Int })
+    for window in windows {
+        guard let boundsDict = window[kCGWindowBounds as String] as? NSDictionary,
+              let bounds = CGRect(dictionaryRepresentation: boundsDict) else { continue }
+        let layer = (window[kCGWindowLayer as String] as? Int) ?? 0
+        let number = (window[kCGWindowNumber as String] as? Int) ?? 0
+        let owner = (window[kCGWindowOwnerName as String] as? String) ?? ""
+        let title = (window[kCGWindowName as String] as? String) ?? ""
+        print(String(format: "layer %3d %@ %5.0fx%-5.0f at %5.0f,%-5.0f  %@ — %@",
+                     layer, onScreen.contains(number) ? "onscreen" : "offspace",
+                     bounds.width, bounds.height, bounds.origin.x, bounds.origin.y, owner, title))
+    }
+    exit(0)
+}
+
 if let index = CommandLine.arguments.firstIndex(of: "--window"), index + 1 < CommandLine.arguments.count {
     let wanted = CommandLine.arguments[index + 1].lowercased()
     // .optionAll, not .optionOnScreenOnly: a full-screen Meet lives in its own Space and
     // would not be listed while the app is started from a terminal in another Space.
     let options: CGWindowListOption = [.optionAll, .excludeDesktopElements]
     let windows = (CGWindowListCopyWindowInfo(options, kCGNullWindowID) as? [[String: Any]]) ?? []
+    // Windows of the Space the user is looking at right now, to prefer them over the rest.
+    let visible = Set(((CGWindowListCopyWindowInfo([.optionOnScreenOnly, .excludeDesktopElements], kCGNullWindowID)
+        as? [[String: Any]]) ?? []).compactMap { $0[kCGWindowNumber as String] as? Int })
     var best: (CGRect, String, String)?
-    for window in windows {
+    var bestVisible = false
+    for window in windows {  // front to back
         guard (window[kCGWindowLayer as String] as? Int) == 0,
               let boundsDict = window[kCGWindowBounds as String] as? NSDictionary,
               let bounds = CGRect(dictionaryRepresentation: boundsDict),
-              bounds.width > 200, bounds.height > 200,  // skip tool windows and stray panels
+              bounds.width > 400, bounds.height > 300,  // skip tool windows and stray panels
               ((window[kCGWindowAlpha as String] as? Double) ?? 1) > 0.1 else { continue }
         let owner = (window[kCGWindowOwnerName as String] as? String) ?? ""
         let title = (window[kCGWindowName as String] as? String) ?? ""
+        guard owner != "Python", title != "transwhisper" else { continue }  // never follow ourselves
         guard title.lowercased().contains(wanted) || owner.lowercased().contains(wanted) else { continue }
-        let area = bounds.width * bounds.height
-        if best == nil || area > best!.0.width * best!.0.height {
+        let isVisible = visible.contains((window[kCGWindowNumber as String] as? Int) ?? -1)
+        // First match wins (the list is ordered front to back), but a window in the
+        // current Space always beats one parked in another Space.
+        if best == nil || (isVisible && !bestVisible) {
             best = (bounds, owner, title)
+            bestVisible = isVisible
         }
     }
     guard let (bounds, owner, title) = best else {
