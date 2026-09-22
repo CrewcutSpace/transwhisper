@@ -63,8 +63,9 @@ MAX_ENTRIES = int(_get("MAX_ENTRIES", "10"))
 OVERLAY_OPACITY = float(_get("OVERLAY_OPACITY", "0.85"))
 # Windows to sit next to, matched against window title/app name, best first (comma separated).
 # Checked every few seconds, so the window follows the call when it opens, moves or resizes.
-FOLLOW_WINDOW = _get("FOLLOW_WINDOW", "Meet,Zoom,Teams,Safari,Chrome,Arc,Firefox,Edge")
-# Show a Dock icon (easier to find the app); 0 hides it, which can help over full-screen apps.
-SHOW_IN_DOCK = _flag("SHOW_IN_DOCK", True)
+FOLLOW_WINDOW = _get("FOLLOW_WINDOW", "Meet,Zoom,Teams,Safari,Chrome,Brave,Arc,Firefox,Edge")
+# A Dock icon makes the app easy to find, but macOS then refuses to float the window over
+# full-screen apps (Meet in full screen). Off by default; the menu bar item is the way in.
+SHOW_IN_DOCK = _flag("SHOW_IN_DOCK", False)
 # Show the original (e.g. English) text above the translation.
 SHOW_ORIGINAL = _flag("SHOW_ORIGINAL", False)
