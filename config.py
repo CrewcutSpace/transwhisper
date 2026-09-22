@@ -61,8 +61,9 @@ ARGOS_DIR = Path(_get("ARGOS_DIR", str(Path.home() / ".local/share/transwhisper/
 # --- Overlay ---------------------------------------------------------------
 MAX_ENTRIES = int(_get("MAX_ENTRIES", "10"))
 OVERLAY_OPACITY = float(_get("OVERLAY_OPACITY", "0.85"))
-# Window(s) to sit next to at startup, matched against title/app name (comma separated).
-FOLLOW_WINDOW = _get("FOLLOW_WINDOW", "Meet,Zoom,Teams")
+# Windows to sit next to, matched against window title/app name, best first (comma separated).
+# Checked every few seconds, so the window follows the call when it opens, moves or resizes.
+FOLLOW_WINDOW = _get("FOLLOW_WINDOW", "Meet,Zoom,Teams,Safari,Chrome,Arc,Firefox,Edge")
 # Show a Dock icon (easier to find the app); 0 hides it, which can help over full-screen apps.
 SHOW_IN_DOCK = _flag("SHOW_IN_DOCK", True)
 # Show the original (e.g. English) text above the translation.
