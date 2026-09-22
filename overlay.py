@@ -319,7 +319,15 @@ class Overlay(QWidget):
             self._save_geometry()
 
 
-def create_app() -> QApplication:
+def create_app(show_in_dock: bool = False) -> QApplication:
     app = QApplication.instance() or QApplication([])
     app.setQuitOnLastWindowClosed(True)
+    # Must happen before the first window is created: a window born under the wrong
+    # policy stays tied to its Space and never shows up over full-screen apps.
+    try:
+        objc = _ObjC()
+        objc.send_long(objc.shared_app(), b"setActivationPolicy:",
+                       REGULAR_POLICY if show_in_dock else ACCESSORY_POLICY)
+    except Exception as exc:
+        logger.warning("Could not set the application mode: {}", exc)
     return app
