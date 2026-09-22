@@ -281,7 +281,7 @@ def run(args) -> int:
     if not args.no_overlay:
         from overlay import Overlay, create_app
 
-        app = create_app()
+        app = create_app(config.SHOW_IN_DOCK)
         overlay = Overlay(
             config.MAX_ENTRIES, config.OVERLAY_OPACITY, config.SHOW_ORIGINAL,
             config.FOLLOW_WINDOW, config.SHOW_IN_DOCK,
