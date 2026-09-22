@@ -16,7 +16,10 @@ once and stays fixed (white); only the part still being spoken is updated (grey)
 At startup the window places itself next to the call window (a Chrome window with Meet, Zoom, Teams — see
 `FOLLOW_WINDOW`), stays on top of everything **including apps in full screen**, in every Space, and never takes focus
 away from the call. Drag it anywhere with the mouse: that position is remembered for runs where no call window is
-found (`~/.local/share/transwhisper/overlay.json`). Final lines (original + translation) are also printed to stdout.
+found (`~/.local/share/transwhisper/overlay.json`).
+
+The app also has a **menu bar item** (a `T` near the clock) with *Show the window*, *Reset the position* and
+*Quit*, and a Dock icon — use them when the window ends up somewhere you cannot reach it. Final lines (original + translation) are also printed to stdout.
 
 ## 1. Allow system audio recording
 
@@ -92,6 +95,7 @@ Defaults live in `config.py`.
 | `MAX_ENTRIES` | `10` | Lines kept in the window |
 | `OVERLAY_OPACITY` | `0.85` | Window opacity |
 | `FOLLOW_WINDOW` | `Meet,Zoom,Teams` | Window titles/apps to place the overlay next to at startup |
+| `SHOW_IN_DOCK` | `1` | Show a Dock icon; `0` hides it (can help the window float over full-screen apps) |
 | `SHOW_ORIGINAL` | `0` | `1` shows the original text above the translation |
 
 ### Translation backends

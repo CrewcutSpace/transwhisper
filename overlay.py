@@ -9,8 +9,8 @@ from pathlib import Path
 
 from loguru import logger
 from PySide6.QtCore import QObject, QRect, Qt, QTimer, Signal
-from PySide6.QtGui import QGuiApplication
-from PySide6.QtWidgets import QApplication, QLabel, QScrollArea, QVBoxLayout, QWidget
+from PySide6.QtGui import QGuiApplication, QIcon, QPainter, QPixmap
+from PySide6.QtWidgets import QApplication, QLabel, QMenu, QScrollArea, QSystemTrayIcon, QVBoxLayout, QWidget
 
 WIDTH = 420
 MARGIN = 16
@@ -25,7 +25,8 @@ STATIONARY = 1 << 4
 FULL_SCREEN_AUXILIARY = 1 << 8
 # NSStatusWindowLevel: above the full-screen app's own window.
 STATUS_WINDOW_LEVEL = 25
-# NSApplicationActivationPolicyAccessory: no Dock icon, and allowed to float over full-screen apps.
+# NSApplicationActivationPolicy: Regular shows a Dock icon, Accessory hides it.
+REGULAR_POLICY = 0
 ACCESSORY_POLICY = 1
 
 
@@ -52,11 +53,11 @@ class _ObjC:
         return self.send(self.lib.objc_getClass(b"NSApplication"), b"sharedApplication")
 
 
-def _configure_native_window(widget: QWidget):
+def _configure_native_window(widget: QWidget, show_in_dock: bool = True):
     """Qt cannot express this, so talk to the underlying NSWindow (and NSApp) directly."""
     try:
         objc = _ObjC()
-        objc.send_long(objc.shared_app(), b"setActivationPolicy:", ACCESSORY_POLICY)
+        objc.send_long(objc.shared_app(), b"setActivationPolicy:", REGULAR_POLICY if show_in_dock else ACCESSORY_POLICY)
         window = objc.send(int(widget.winId()), b"window")
         objc.send_long(window, b"setCollectionBehavior:", CAN_JOIN_ALL_SPACES | STATIONARY | FULL_SCREEN_AUXILIARY)
         objc.send_long(window, b"setLevel:", STATUS_WINDOW_LEVEL)
@@ -90,7 +91,8 @@ class _Bridge(QObject):
 
 
 class Overlay(QWidget):
-    def __init__(self, max_entries: int, opacity: float, show_original: bool, follow_window: str = ""):
+    def __init__(self, max_entries: int, opacity: float, show_original: bool, follow_window: str = "",
+                 show_in_dock: bool = True):
         super().__init__(
             None,
             Qt.WindowType.Tool
@@ -105,8 +107,11 @@ class Overlay(QWidget):
         self.setWindowOpacity(opacity)
         self.setStyleSheet("background-color: #151515;")
 
+        self.setWindowTitle("transwhisper")
         self.max_entries = max_entries
         self.show_original = show_original
+        self.show_in_dock = show_in_dock
+        self.follow_window = follow_window
         self._pending: QLabel | None = None  # line still being spoken, updated in place
         self._drag_offset = None
         self._bridge = _Bridge()
@@ -137,12 +142,54 @@ class Overlay(QWidget):
 
     def show(self):
         super().show()
-        _configure_native_window(self)
+        _configure_native_window(self, self.show_in_dock)
         # Qt resets the native window when it is re-created (screen change, Space switch),
         # so keep re-applying: the call is cheap.
         self._keep_floating = QTimer(self)
-        self._keep_floating.timeout.connect(lambda: _configure_native_window(self))
+        self._keep_floating.timeout.connect(lambda: _configure_native_window(self, self.show_in_dock))
         self._keep_floating.start(2000)
+        self._menu_bar_icon()
+
+    def _menu_bar_icon(self):
+        """A menu bar item, so the window can always be found again even if it ends up
+        somewhere awkward or behind a full-screen app."""
+        if getattr(self, "_tray", None) is not None:
+            return
+        icon = QPixmap(22, 22)
+        icon.fill(Qt.GlobalColor.transparent)
+        painter = QPainter(icon)
+        painter.setPen(Qt.GlobalColor.black)
+        font = painter.font()
+        font.setPixelSize(16)
+        font.setBold(True)
+        painter.setFont(font)
+        painter.drawText(icon.rect(), Qt.AlignmentFlag.AlignCenter, "T")
+        painter.end()
+        image = QIcon(icon)
+        image.setIsMask(True)  # follows the light/dark menu bar
+
+        self._menu = QMenu()
+        self._menu.addAction("Show the window", self._bring_back)
+        self._menu.addAction("Reset the position", self._reset_position)
+        self._menu.addSeparator()
+        self._menu.addAction("Quit", QApplication.instance().quit)
+
+        self._tray = QSystemTrayIcon(image, self)
+        self._tray.setToolTip("transwhisper")
+        self._tray.setContextMenu(self._menu)
+        self._tray.activated.connect(lambda _reason: self._bring_back())
+        self._tray.show()
+
+    def _bring_back(self):
+        if not self.isVisible():
+            self.show()
+        self.raise_()
+        _configure_native_window(self, self.show_in_dock)
+
+    def _reset_position(self):
+        STATE_FILE.unlink(missing_ok=True)
+        self._place(self.follow_window)
+        self._bring_back()
 
     # --- placement ---------------------------------------------------------
 

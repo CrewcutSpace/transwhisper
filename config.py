@@ -63,5 +63,7 @@ MAX_ENTRIES = int(_get("MAX_ENTRIES", "10"))
 OVERLAY_OPACITY = float(_get("OVERLAY_OPACITY", "0.85"))
 # Window(s) to sit next to at startup, matched against title/app name (comma separated).
 FOLLOW_WINDOW = _get("FOLLOW_WINDOW", "Meet,Zoom,Teams")
+# Show a Dock icon (easier to find the app); 0 hides it, which can help over full-screen apps.
+SHOW_IN_DOCK = _flag("SHOW_IN_DOCK", True)
 # Show the original (e.g. English) text above the translation.
 SHOW_ORIGINAL = _flag("SHOW_ORIGINAL", False)
