@@ -13,8 +13,9 @@ The window shows the last ~10 lines. The line being spoken appears after ~1.5 s.
 recognised the same way twice, so shown text does not jump around. Each finished sentence or clause is translated
 once and stays fixed (white); only the part still being spoken is updated (grey).
 
-At startup the window places itself next to the call window (a Chrome window with Meet, Zoom, Teams — see
-`FOLLOW_WINDOW`), stays on top of everything **including apps in full screen**, in every Space, and never takes focus
+The window sits next to the call window (a browser window with Meet, or Zoom/Teams — see `FOLLOW_WINDOW`) and keeps
+up with it: it is re-checked every 3 seconds, so it also moves there when the call is opened after the app was
+started. It stays on top of everything **including apps in full screen**, in every Space, and never takes focus
 away from the call. Drag it anywhere with the mouse: that position is remembered for runs where no call window is
 found (`~/.local/share/transwhisper/overlay.json`).
 
@@ -94,7 +95,7 @@ Defaults live in `config.py`.
 | `ARGOS_DIR` | `~/.local/share/transwhisper/argos` | Where Argos models are downloaded |
 | `MAX_ENTRIES` | `10` | Lines kept in the window |
 | `OVERLAY_OPACITY` | `0.85` | Window opacity |
-| `FOLLOW_WINDOW` | `Meet,Zoom,Teams` | Window titles/apps to place the overlay next to at startup |
+| `FOLLOW_WINDOW` | `Meet,Zoom,Teams,Safari,Chrome,...` | Windows to sit next to, best match first; re-checked every 3 s |
 | `SHOW_IN_DOCK` | `1` | Show a Dock icon; `0` hides it (can help the window float over full-screen apps) |
 | `SHOW_ORIGINAL` | `0` | `1` shows the original text above the translation |
 

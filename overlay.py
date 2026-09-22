@@ -79,7 +79,6 @@ def find_window(patterns: str) -> dict | None:
             logger.debug("Window lookup for {!r} failed: {}", pattern, exc)
             continue
         if window.get("width"):
-            logger.info("Placing the window next to: {} — {}", window["owner"], window["title"])
             return window
     return None
 
@@ -112,6 +111,8 @@ class Overlay(QWidget):
         self.show_original = show_original
         self.show_in_dock = show_in_dock
         self.follow_window = follow_window
+        self._following = True
+        self._followed_window = ""
         self._pending: QLabel | None = None  # line still being spoken, updated in place
         self._drag_offset = None
         self._bridge = _Bridge()
@@ -148,6 +149,10 @@ class Overlay(QWidget):
         self._keep_floating = QTimer(self)
         self._keep_floating.timeout.connect(lambda: _configure_native_window(self, self.show_in_dock))
         self._keep_floating.start(2000)
+        # The call window may only appear, move or resize after the app was started.
+        self._keep_following = QTimer(self)
+        self._keep_following.timeout.connect(self._follow_tick)
+        self._keep_following.start(3000)
         self._menu_bar_icon()
 
     def _menu_bar_icon(self):
@@ -170,6 +175,7 @@ class Overlay(QWidget):
 
         self._menu = QMenu()
         self._menu.addAction("Show the window", self._bring_back)
+        self._menu.addAction("Move to the call window", self._follow_again)
         self._menu.addAction("Reset the position", self._reset_position)
         self._menu.addSeparator()
         self._menu.addAction("Quit", QApplication.instance().quit)
@@ -186,22 +192,45 @@ class Overlay(QWidget):
         self.raise_()
         _configure_native_window(self, self.show_in_dock)
 
+    def _follow_again(self):
+        self._following = True
+        self._followed_window = ""
+        if not self._follow_tick():
+            logger.warning("No call window found (looking for: {})", self.follow_window)
+        self._bring_back()
+
     def _reset_position(self):
         STATE_FILE.unlink(missing_ok=True)
+        self._following = True
+        self._followed_window = ""
         self._place(self.follow_window)
         self._bring_back()
 
     # --- placement ---------------------------------------------------------
 
     def _place(self, follow_window: str):
-        call = find_window(follow_window) if follow_window else None
-        if call:
-            self.setGeometry(self._beside(QRect(call["x"], call["y"], call["width"], call["height"])))
+        if self._follow_tick():
             return
         if self._restore_geometry():
             return
         screen = QGuiApplication.primaryScreen().availableGeometry()
         self.setGeometry(screen.right() - WIDTH - MARGIN, screen.top() + MARGIN, WIDTH, screen.height() - 2 * MARGIN)
+
+    def _follow_tick(self) -> bool:
+        """Sit next to the call window and keep up when it appears later, moves or resizes.
+        Dragging the window by hand switches this off until the menu bar item switches it back on."""
+        if not self._following or not self.follow_window:
+            return False
+        call = find_window(self.follow_window)
+        if not call:
+            return False
+        target = self._beside(QRect(call["x"], call["y"], call["width"], call["height"]))
+        if target != self.geometry():
+            self.setGeometry(target)
+        if self._followed_window != call["title"]:
+            logger.info("Window placed next to: {} — {}", call["owner"], call["title"])
+            self._followed_window = call["title"]
+        return True
 
     def _beside(self, call: QRect) -> QRect:
         """Right next to the call window: outside it if there is room, otherwise along its right edge."""
@@ -285,6 +314,8 @@ class Overlay(QWidget):
     def mouseReleaseEvent(self, event):
         if self._drag_offset is not None:
             self._drag_offset = None
+            # Placed by hand: stop following the call window until asked again.
+            self._following = False
             self._save_geometry()
 
 
