@@ -59,7 +59,8 @@ LIVE_BACKEND = _get("LIVE_BACKEND", "auto").lower()
 ARGOS_DIR = Path(_get("ARGOS_DIR", str(Path.home() / ".local/share/transwhisper/argos"))).expanduser()
 
 # --- Overlay ---------------------------------------------------------------
-MAX_ENTRIES = int(_get("MAX_ENTRIES", "10"))
+# Lines kept in the window; scroll up to read them. Older ones are dropped.
+MAX_ENTRIES = int(_get("MAX_ENTRIES", "500"))
 OVERLAY_OPACITY = float(_get("OVERLAY_OPACITY", "0.85"))
 # Windows to sit next to, matched against window title/app name, best first (comma separated).
 # Checked every few seconds, so the window follows the call when it opens, moves or resizes.
