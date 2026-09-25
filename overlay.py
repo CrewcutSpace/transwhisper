@@ -15,7 +15,7 @@ from PySide6.QtWidgets import QAbstractButton, QApplication, QHBoxLayout, QLabel
 # Default size; the window can be resized from its bottom-right corner and keeps that size.
 WIDTH = 380
 SPLIT_WIDTH = 600  # original on the left, translation on the right
-HEIGHT = 260
+HEIGHT = 380
 MARGIN = 16
 GAP = 8
 STATE_FILE = Path.home() / ".local/share/transwhisper/overlay.json"
@@ -210,7 +210,7 @@ class Overlay(QWidget):
         self._bridge.entry.connect(self._update)
 
         self._feed = QVBoxLayout()
-        self._feed.setContentsMargins(12, 4, 12, 8)
+        self._feed.setContentsMargins(12, 4, 4, 8)  # + the 8px scrollbar on the right
         self._feed.setSpacing(8)
         # Reads like a document: from the top down, each new entry below the last one.
         self._feed.addStretch(1)
@@ -224,11 +224,21 @@ class Overlay(QWidget):
         self._scroll.setFrameShape(QScrollArea.Shape.NoFrame)
         self._scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         self._scroll.setFocusPolicy(Qt.FocusPolicy.NoFocus)
-        self._scroll.setStyleSheet("QScrollArea { background: transparent; }")
-        self._scroll.viewport().setAutoFillBackground(False)
-        self._scroll.verticalScrollBar().rangeChanged.connect(
-            lambda _min, max_: self._scroll.verticalScrollBar().setValue(max_)
+        self._scroll.setStyleSheet(
+            "QScrollArea { background: transparent; }"
+            "QScrollBar:vertical { width: 8px; background: transparent; margin: 0; }"
+            "QScrollBar::handle:vertical { background: rgba(128, 128, 128, 110); border-radius: 3px;"
+            " min-height: 24px; margin: 0 2px 0 0; }"
+            "QScrollBar::add-line, QScrollBar::sub-line, QScrollBar::add-page, QScrollBar::sub-page"
+            " { background: none; height: 0; }"
         )
+        self._scroll.viewport().setAutoFillBackground(False)
+        # Follow new text only while the view is at the bottom, so scrolling up to read
+        # the history is not yanked back down by every new word.
+        self._at_bottom = True
+        bar = self._scroll.verticalScrollBar()
+        bar.valueChanged.connect(lambda value: setattr(self, "_at_bottom", value >= bar.maximum() - 4))
+        bar.rangeChanged.connect(lambda _min, max_: bar.setValue(max_) if self._at_bottom else None)
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 2, 2)
@@ -238,12 +248,9 @@ class Overlay(QWidget):
         grip = QSizeGrip(self)
         grip.setStyleSheet("background: transparent;")
         layout.addWidget(grip, 0, Qt.AlignmentFlag.AlignBottom | Qt.AlignmentFlag.AlignRight)
+        # Save the size when the user lets go of the corner (not on resizes made by the app).
+        grip.installEventFilter(self)
         self.setMinimumSize(240, 140)
-        # Save the size once the user stops resizing.
-        self._save_later = QTimer(self)
-        self._save_later.setSingleShot(True)
-        self._save_later.setInterval(500)
-        self._save_later.timeout.connect(self._save_geometry)
 
         self._place(follow_window)
 
@@ -389,10 +396,10 @@ class Overlay(QWidget):
         except OSError as exc:
             logger.debug("Could not save the window position: {}", exc)
 
-    def resizeEvent(self, event):
-        super().resizeEvent(event)
-        if self.isVisible() and event.oldSize().isValid() and event.oldSize() != event.size():
-            self._save_later.start()
+    def eventFilter(self, watched, event):
+        if isinstance(watched, QSizeGrip) and event.type() == QEvent.Type.MouseButtonRelease:
+            self._save_geometry()
+        return False
 
     # --- look --------------------------------------------------------------
 

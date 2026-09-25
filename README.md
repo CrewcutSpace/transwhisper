@@ -93,7 +93,7 @@ Defaults live in `config.py`.
 | `LIVE_BACKEND` | `auto` | Backend for the line still being spoken: `auto`, `same`, `argos`, `apple`, `off` |
 | `DEEPL_API_KEY` | — | DeepL API key (free tier), only from env/.env |
 | `ARGOS_DIR` | `~/.local/share/transwhisper/argos` | Where Argos models are downloaded |
-| `MAX_ENTRIES` | `10` | Lines kept in the window |
+| `MAX_ENTRIES` | `500` | Lines kept in the window (scroll up to read them) |
 | `OVERLAY_OPACITY` | `0.85` | Window opacity |
 | `FOLLOW_WINDOW` | `Meet,Zoom,Teams,Safari,Chrome,...` | Windows to sit next to, best match first; re-checked every 3 s |
 | `SHOW_IN_DOCK` | `0` | `1` adds a Dock icon, but macOS then keeps the window out of full-screen Spaces |
