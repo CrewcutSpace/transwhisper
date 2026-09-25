@@ -97,7 +97,7 @@ Defaults live in `config.py`.
 | `OVERLAY_OPACITY` | `0.85` | Window opacity |
 | `FOLLOW_WINDOW` | `Meet,Zoom,Teams,Safari,Chrome,...` | Windows to sit next to, best match first; re-checked every 3 s |
 | `SHOW_IN_DOCK` | `0` | `1` adds a Dock icon, but macOS then keeps the window out of full-screen Spaces |
-| `SHOW_ORIGINAL` | `0` | `1` shows the original text above the translation |
+| `SHOW_ORIGINAL` | `1` | original on the left, translation on the right; `0` shows only the translation |
 
 ### Translation backends
 
