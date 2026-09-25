@@ -4,6 +4,7 @@ import json
 import re
 import shutil
 import subprocess
+import time
 import urllib.request
 import zipfile
 from pathlib import Path
@@ -215,7 +216,17 @@ class AppleTranslator:
             raise TranslationError(f"Could not build the macOS translator helper:\n{build.stdout}{build.stderr}")
 
     def prepare(self, source: str) -> None:
-        self.translate("Hello, this is a test.", source)
+        # Right after login or a system update the translation service can report a pair
+        # as not installed for a few seconds while it is still loading, so give it a moment.
+        for attempt in range(1, 6):
+            try:
+                self.translate("Hello, this is a test.", source)
+                return
+            except TranslationError as exc:
+                if str(exc) != APPLE_INSTALL_HINT or attempt == 5:
+                    raise
+                logger.info("The macOS translator is not ready yet, retrying ({}/5)...", attempt)
+                time.sleep(2)
 
     def close(self) -> None:
         if self._process.poll() is None:

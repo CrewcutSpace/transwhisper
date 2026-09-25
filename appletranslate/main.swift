@@ -57,6 +57,8 @@ while let line = readLine(strippingNewline: true) {
         write(["text": response.targetText])
     } catch {
         // notInstalled is the common one: the user has to add the language pair in System Settings.
+        // Drop the session so the next request starts a fresh one instead of reusing a failed one.
+        sessions["\(source)>\(target)"] = nil
         write(["error": "\(error)"])
     }
 }

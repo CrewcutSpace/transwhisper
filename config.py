@@ -67,5 +67,5 @@ FOLLOW_WINDOW = _get("FOLLOW_WINDOW", "Meet,Zoom,Teams,Safari,Chrome,Brave,Arc,F
 # A Dock icon makes the app easy to find, but macOS then refuses to float the window over
 # full-screen apps (Meet in full screen). Off by default; the menu bar item is the way in.
 SHOW_IN_DOCK = _flag("SHOW_IN_DOCK", False)
-# Show the original (e.g. English) text above the translation.
-SHOW_ORIGINAL = _flag("SHOW_ORIGINAL", False)
+# Show the original (e.g. English) text in a column to the left of the translation.
+SHOW_ORIGINAL = _flag("SHOW_ORIGINAL", True)

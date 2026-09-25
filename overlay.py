@@ -8,11 +8,14 @@ import subprocess
 from pathlib import Path
 
 from loguru import logger
-from PySide6.QtCore import QObject, QRect, Qt, QTimer, Signal
-from PySide6.QtGui import QGuiApplication, QIcon, QPainter, QPixmap
-from PySide6.QtWidgets import QApplication, QLabel, QMenu, QScrollArea, QSystemTrayIcon, QVBoxLayout, QWidget
+from PySide6.QtCore import QEvent, QObject, QRect, Qt, QTimer, Signal
+from PySide6.QtGui import QColor, QGuiApplication, QIcon, QPainter, QPainterPath, QPen, QPixmap
+from PySide6.QtWidgets import QAbstractButton, QApplication, QHBoxLayout, QLabel, QSizeGrip, QMenu, QScrollArea, QSystemTrayIcon, QVBoxLayout, QWidget
 
-WIDTH = 420
+# Default size; the window can be resized from its bottom-right corner and keeps that size.
+WIDTH = 380
+SPLIT_WIDTH = 600  # original on the left, translation on the right
+HEIGHT = 260
 MARGIN = 16
 GAP = 8
 STATE_FILE = Path.home() / ".local/share/transwhisper/overlay.json"
@@ -28,6 +31,88 @@ STATUS_WINDOW_LEVEL = 25
 # NSApplicationActivationPolicy: Regular shows a Dock icon, Accessory hides it.
 REGULAR_POLICY = 0
 ACCESSORY_POLICY = 1
+
+RADIUS = 12
+# Follows the macOS appearance (System Settings > Appearance), switching live.
+THEMES = {
+    "dark": {"background": QColor(30, 30, 32), "border": QColor(255, 255, 255, 30),
+             "done": "#f2f2f7", "pending": "#98989d", "original": "#8e8e93"},
+    "light": {"background": QColor(246, 246, 248), "border": QColor(0, 0, 0, 30),
+              "done": "#1d1d1f", "pending": "#6e6e73", "original": "#86868b"},
+}
+
+
+class _TrafficLight(QAbstractButton):
+    """A macOS-style window button: a coloured dot that shows its symbol on hover."""
+
+    SIZE = 12
+
+    def __init__(self, color: str, symbol: str, tooltip: str, parent: QWidget):
+        super().__init__(parent)
+        self._color = QColor(color)
+        self._symbol = symbol
+        self.setFixedSize(self.SIZE, self.SIZE)
+        self.setToolTip(tooltip)
+        self.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        self.setCursor(Qt.CursorShape.ArrowCursor)
+        self.show_symbol = False
+
+    def paintEvent(self, event):
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        painter.setPen(QPen(self._color.darker(115), 0.5))
+        painter.setBrush(self._color.darker(115) if self.isDown() else self._color)
+        painter.drawEllipse(self.rect().adjusted(0, 0, -1, -1))
+        if not self.show_symbol:
+            return
+        pen = QPen(QColor(0, 0, 0, 150), 1.3)
+        pen.setCapStyle(Qt.PenCapStyle.RoundCap)
+        painter.setPen(pen)
+        c, d = self.SIZE / 2 - 0.5, 2.5
+        if self._symbol == "close":
+            painter.drawLine(int(c - d), int(c - d), int(c + d), int(c + d))
+            painter.drawLine(int(c - d), int(c + d), int(c + d), int(c - d))
+        else:
+            painter.drawLine(int(c - d - 0.5), int(c), int(c + d + 0.5), int(c))
+
+
+class _TitleBar(QWidget):
+    """Close and minimise buttons in the top-left corner, symbols shown while hovering the group."""
+
+    def __init__(self, on_close, on_minimise, parent: QWidget):
+        super().__init__(parent)
+        self.setFixedHeight(28)
+        self.close_button = _TrafficLight("#ff5f57", "close", "Quit transwhisper", self)
+        self.minimise_button = _TrafficLight("#febc2e", "minimise", "Hide to the menu bar", self)
+        self.close_button.clicked.connect(on_close)
+        self.minimise_button.clicked.connect(on_minimise)
+        self._buttons = QWidget(self)
+        row = QHBoxLayout(self._buttons)
+        row.setContentsMargins(0, 0, 0, 0)
+        row.setSpacing(8)
+        row.addWidget(self.close_button)
+        row.addWidget(self.minimise_button)
+        self._buttons.setAttribute(Qt.WidgetAttribute.WA_Hover)
+        self._buttons.installEventFilter(self)
+        layout = QHBoxLayout(self)
+        layout.setContentsMargins(12, 10, 12, 0)
+        layout.addWidget(self._buttons)
+        layout.addStretch(1)
+
+    def eventFilter(self, watched, event):
+        if event.type() in (QEvent.Type.HoverEnter, QEvent.Type.HoverLeave):
+            hovering = event.type() == QEvent.Type.HoverEnter
+            for button in (self.close_button, self.minimise_button):
+                button.show_symbol = hovering
+                button.update()
+        return False
+
+
+def _is_dark() -> bool:
+    scheme = QGuiApplication.styleHints().colorScheme()
+    if scheme == Qt.ColorScheme.Unknown:
+        return QGuiApplication.palette().window().color().lightness() < 128
+    return scheme == Qt.ColorScheme.Dark
 
 
 class _ObjC:
@@ -104,11 +189,17 @@ class Overlay(QWidget):
         self.setAttribute(Qt.WidgetAttribute.WA_MacAlwaysShowToolWindow)
         self.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         self.setWindowOpacity(opacity)
-        self.setStyleSheet("background-color: #151515;")
+        # Rounded corners: the window itself is transparent, paintEvent draws the panel.
+        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
+        self._theme = THEMES["dark" if _is_dark() else "light"]
+        QGuiApplication.styleHints().colorSchemeChanged.connect(self._apply_theme)
 
         self.setWindowTitle("transwhisper")
         self.max_entries = max_entries
         self.show_original = show_original
+        self._layout_name = "split" if show_original else "single"
+        self.resize(SPLIT_WIDTH if show_original else WIDTH, HEIGHT)
+        self._restore_size()
         self.show_in_dock = show_in_dock
         self.follow_window = follow_window
         self._following = True
@@ -119,11 +210,13 @@ class Overlay(QWidget):
         self._bridge.entry.connect(self._update)
 
         self._feed = QVBoxLayout()
-        self._feed.setContentsMargins(12, 12, 12, 12)
-        self._feed.setSpacing(10)
+        self._feed.setContentsMargins(12, 4, 12, 8)
+        self._feed.setSpacing(8)
+        # Reads like a document: from the top down, each new entry below the last one.
         self._feed.addStretch(1)
         container = QWidget()
         container.setLayout(self._feed)
+        container.setStyleSheet("background: transparent;")
 
         self._scroll = QScrollArea()
         self._scroll.setWidget(container)
@@ -131,19 +224,34 @@ class Overlay(QWidget):
         self._scroll.setFrameShape(QScrollArea.Shape.NoFrame)
         self._scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         self._scroll.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        self._scroll.setStyleSheet("QScrollArea { background: transparent; }")
+        self._scroll.viewport().setAutoFillBackground(False)
         self._scroll.verticalScrollBar().rangeChanged.connect(
             lambda _min, max_: self._scroll.verticalScrollBar().setValue(max_)
         )
 
         layout = QVBoxLayout(self)
-        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setContentsMargins(0, 0, 2, 2)
+        layout.setSpacing(0)
+        layout.addWidget(_TitleBar(QApplication.instance().quit, self.hide, self))
         layout.addWidget(self._scroll)
+        grip = QSizeGrip(self)
+        grip.setStyleSheet("background: transparent;")
+        layout.addWidget(grip, 0, Qt.AlignmentFlag.AlignBottom | Qt.AlignmentFlag.AlignRight)
+        self.setMinimumSize(240, 140)
+        # Save the size once the user stops resizing.
+        self._save_later = QTimer(self)
+        self._save_later.setSingleShot(True)
+        self._save_later.setInterval(500)
+        self._save_later.timeout.connect(self._save_geometry)
 
         self._place(follow_window)
 
     def show(self):
         super().show()
         _configure_native_window(self, self.show_in_dock)
+        if getattr(self, "_keep_floating", None) is not None:
+            return  # shown again after being hidden: the timers are already running
         # Qt resets the native window when it is re-created (screen change, Space switch),
         # so keep re-applying: the call is cheap.
         self._keep_floating = QTimer(self)
@@ -176,7 +284,7 @@ class Overlay(QWidget):
         self._menu = QMenu()
         self._menu.addAction("Show the window", self._bring_back)
         self._menu.addAction("Move to the call window", self._follow_again)
-        self._menu.addAction("Reset the position", self._reset_position)
+        self._menu.addAction("Reset the position and size", self._reset_position)
         self._menu.addSeparator()
         self._menu.addAction("Quit", QApplication.instance().quit)
 
@@ -201,6 +309,7 @@ class Overlay(QWidget):
 
     def _reset_position(self):
         STATE_FILE.unlink(missing_ok=True)
+        self.resize(SPLIT_WIDTH if self.show_original else WIDTH, HEIGHT)
         self._following = True
         self._followed_window = ""
         self._place(self.follow_window)
@@ -214,7 +323,7 @@ class Overlay(QWidget):
         if self._restore_geometry():
             return
         screen = QGuiApplication.primaryScreen().availableGeometry()
-        self.setGeometry(screen.right() - WIDTH - MARGIN, screen.top() + MARGIN, WIDTH, screen.height() - 2 * MARGIN)
+        self.move(screen.right() - self.width() - MARGIN, screen.top() + MARGIN)
 
     def _follow_tick(self) -> bool:
         """Sit next to the call window and keep up when it appears later, moves or resizes.
@@ -233,34 +342,80 @@ class Overlay(QWidget):
         return True
 
     def _beside(self, call: QRect) -> QRect:
-        """Right next to the call window: outside it if there is room, otherwise along its right edge."""
+        """Next to the top-right corner of the call window: outside it if there is room,
+        otherwise just inside its right edge. Only the position follows; the size stays."""
         screen = QGuiApplication.screenAt(call.center()) or QGuiApplication.primaryScreen()
         area = screen.availableGeometry()
-        height = min(call.height() - 2 * GAP, area.height() - 2 * GAP)
+        width, height = self.width(), min(self.height(), area.height() - 2 * GAP)
         top = max(area.top() + GAP, min(call.top() + GAP, area.bottom() - height - GAP))
-        if area.right() - call.right() >= WIDTH + 2 * GAP:
-            return QRect(call.right() + GAP, top, WIDTH, height)
-        return QRect(min(call.right(), area.right()) - WIDTH - GAP, top, WIDTH, height)
+        if area.right() - call.right() >= width + 2 * GAP:
+            return QRect(call.right() + GAP, top, width, height)
+        return QRect(min(call.right(), area.right()) - width - GAP, top, width, height)
 
     def _restore_geometry(self) -> bool:
         """Reuse wherever the window was dragged to last time."""
+        saved = self._load_state()
         try:
-            saved = json.loads(STATE_FILE.read_text())
             screen = QGuiApplication.primaryScreen().availableGeometry()
             if screen.contains(saved["x"] + 40, saved["y"] + 40):
-                self.setGeometry(saved["x"], saved["y"], saved["width"], saved["height"])
+                self.move(saved["x"], saved["y"])
                 return True
-        except (OSError, ValueError, KeyError):
+        except KeyError:
             pass
         return False
 
+    def _restore_size(self):
+        """The size the window was resized to, kept per layout (one or two columns)."""
+        size = self._load_state().get("sizes", {}).get(self._layout_name)
+        if size:
+            self.resize(size[0], size[1])
+
+    @staticmethod
+    def _load_state() -> dict:
+        try:
+            return json.loads(STATE_FILE.read_text())
+        except (OSError, ValueError):
+            return {}
+
     def _save_geometry(self):
+        state = self._load_state()
         rect = self.geometry()
+        if not self._following:
+            state.update(x=rect.x(), y=rect.y())
+        state.setdefault("sizes", {})[self._layout_name] = [rect.width(), rect.height()]
         try:
             STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
-            STATE_FILE.write_text(json.dumps({"x": rect.x(), "y": rect.y(), "width": rect.width(), "height": rect.height()}))
+            STATE_FILE.write_text(json.dumps(state))
         except OSError as exc:
             logger.debug("Could not save the window position: {}", exc)
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        if self.isVisible() and event.oldSize().isValid() and event.oldSize() != event.size():
+            self._save_later.start()
+
+    # --- look --------------------------------------------------------------
+
+    def paintEvent(self, event):
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        path = QPainterPath()
+        path.addRoundedRect(self.rect().adjusted(0, 0, -1, -1), RADIUS, RADIUS)
+        painter.fillPath(path, self._theme["background"])
+        painter.setPen(QPen(self._theme["border"], 1))
+        painter.drawPath(path)
+        if self.show_original:
+            # The divider between the original and the translation columns.
+            x = self.width() // 2
+            painter.drawLine(x, self._scroll.y() + 4, x, self.height() - RADIUS)
+
+    def _apply_theme(self, *_):
+        self._theme = THEMES["dark" if _is_dark() else "light"]
+        for i in range(self._feed.count()):
+            row = self._feed.itemAt(i).widget()
+            if row is not None:
+                self._fill(row, *row.property("entry"))
+        self.update()
 
     # --- feed --------------------------------------------------------------
 
@@ -269,14 +424,35 @@ class Overlay(QWidget):
         sentence still being spoken (grey). Partial updates replace the current line; a final one commits it."""
         self._bridge.entry.emit(original, done, pending, final)
 
-    def _render(self, original: str, done: str, pending: str) -> str:
-        text = (
-            f'<div style="font-size:17px;"><span style="color:#f2f2f2;">{html.escape(done)}</span> '
-            f'<span style="color:#9a9a9a;">{html.escape(pending)}</span></div>'
+    def _new_row(self) -> QWidget:
+        """One entry: the translation, with the original in a column to its left if shown."""
+        row = QWidget()
+        row.setStyleSheet("background: transparent;")
+        columns = QHBoxLayout(row)
+        columns.setContentsMargins(0, 0, 0, 0)
+        # Twice the feed margin, so the gap is centred on the divider drawn in paintEvent.
+        columns.setSpacing(24)
+        row.labels = []
+        for _ in range(2 if self.show_original else 1):
+            label = QLabel()
+            label.setWordWrap(True)
+            label.setTextFormat(Qt.TextFormat.RichText)
+            label.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+            label.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignTop)
+            columns.addWidget(label, 1)
+            row.labels.append(label)
+        return row
+
+    def _fill(self, row: QWidget, original: str, done: str, pending: str):
+        theme = self._theme
+        row.labels[-1].setText(
+            f'<div style="font-size:15px;"><span style="color:{theme["done"]};">{html.escape(done)}</span> '
+            f'<span style="color:{theme["pending"]};">{html.escape(pending)}</span></div>'
         )
         if self.show_original:
-            text = f'<div style="color:#8a8a8a; font-size:13px; margin-bottom:3px;">{html.escape(original)}</div>' + text
-        return text
+            row.labels[0].setText(
+                f'<div style="font-size:15px; color:{theme["original"]};">{html.escape(original)}</div>'
+            )
 
     def _update(self, original: str, done: str, pending: str, final: bool):
         if not (done + pending).strip():
@@ -286,19 +462,17 @@ class Overlay(QWidget):
                 self._pending = None
             return
         if self._pending is None:
-            self._pending = QLabel()
-            self._pending.setWordWrap(True)
-            self._pending.setTextFormat(Qt.TextFormat.RichText)
-            self._pending.setFocusPolicy(Qt.FocusPolicy.NoFocus)
-            self._feed.addWidget(self._pending)
+            self._pending = self._new_row()
+            self._feed.insertWidget(self._feed.count() - 1, self._pending)
 
-        self._pending.setText(self._render(original, done, pending))
+        self._pending.setProperty("entry", (original, done, pending))
+        self._fill(self._pending, original, done, pending)
         if final:
             self._pending = None
 
-        # Index 0 is the stretch that keeps entries pinned to the bottom.
+        # The last item is the stretch; the oldest entry is the first one.
         while self._feed.count() - 1 > self.max_entries:
-            item = self._feed.takeAt(1)
+            item = self._feed.takeAt(0)
             item.widget().deleteLater()
 
     # --- dragging ----------------------------------------------------------
