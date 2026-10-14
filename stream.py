@@ -10,22 +10,23 @@ from faster_whisper.vad import VadOptions, get_speech_timestamps
 RATE = 16000
 VAD_WINDOW = 512  # Silero VAD frame size at 16 kHz
 KEEP_BEFORE_SPEECH = int(0.3 * RATE)
+SENTENCE_ENDINGS = (".", "!", "?", "…")
 
 
 def normalize_word(word: str) -> str:
     return re.sub(r"[^\w']", "", word.lower())
 
 
-def split_units(words: list[str], min_clause_words: int) -> tuple[list[list[str]], list[str]]:
-    """Split words into translation units: sentences, and clauses after a comma etc. once they
-    are long enough to translate on their own. Returns (complete units, unfinished tail).
-    A unit counts as complete only when more words follow it: Whisper often puts a full stop
+def split_units(words: list[str]) -> tuple[list[list[str]], list[str]]:
+    """Split words into sentences, the unit of translation: a translator given half a sentence
+    gets the grammar wrong. Returns (complete sentences, unfinished tail).
+    A sentence counts as complete only when more words follow it: Whisper often puts a full stop
     after the last word it has heard so far, even mid-sentence."""
     units: list[list[str]] = []
     current: list[str] = []
     for word in words:
         current.append(word)
-        if word.endswith((".", "!", "?", "…")) or (word.endswith((",", ";", ":")) and len(current) >= min_clause_words):
+        if word.endswith(SENTENCE_ENDINGS):
             units.append(current)
             current = []
     if not current and units:

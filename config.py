@@ -32,6 +32,8 @@ SILENCE_THRESHOLD = float(_get("SILENCE_THRESHOLD", "0.003"))
 PARTIAL_STEP_SECONDS = float(_get("PARTIAL_STEP_SECONDS", "0.4"))
 # A pause this long ends the current line.
 PAUSE_SECONDS = float(_get("PAUSE_SECONDS", "0.6"))
+# A sentence interrupted by a pause up to this long is joined with what follows and translated whole.
+JOIN_PAUSE_SECONDS = float(_get("JOIN_PAUSE_SECONDS", "3"))
 # Lines are force-split when someone talks this long without a pause.
 MAX_SEGMENT_SECONDS = float(_get("MAX_SEGMENT_SECONDS", "12"))
 

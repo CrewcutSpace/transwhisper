@@ -10,8 +10,11 @@ with faster-whisper and shows a live translation into the language you pick.
 ```
 
 The window shows the last ~10 lines. The line being spoken appears after ~1.5 s. A word is shown only once it has been
-recognised the same way twice, so shown text does not jump around. Each finished sentence or clause is translated
-once and stays fixed (white); only the part still being spoken is updated (grey).
+recognised the same way twice, so shown text does not jump around. Only whole sentences are translated: a
+translator given half a sentence gets the grammar wrong. Each finished sentence is translated once and stays fixed
+(white); only the sentence still being spoken is updated (grey). When someone pauses mid-sentence, the last sentence
+stays grey for up to `JOIN_PAUSE_SECONDS`: if they go on, it is heard again together with the rest and translated
+as one sentence.
 
 The window sits next to the call window (a browser window with Meet, or Zoom/Teams — see `FOLLOW_WINDOW`) and keeps
 up with it: it is re-checked every 3 seconds, so it also moves there when the call is opened after the app was
@@ -84,6 +87,7 @@ Defaults live in `config.py`.
 | `SILENCE_THRESHOLD` | `0.003` | Audio quieter than this (RMS) is never treated as speech |
 | `PARTIAL_STEP_SECONDS` | `0.4` | How often the line being spoken is updated |
 | `PAUSE_SECONDS` | `0.6` | A pause this long finalises the line |
+| `JOIN_PAUSE_SECONDS` | `3` | A sentence interrupted by a pause up to this long is joined with what follows and translated whole |
 | `MAX_SEGMENT_SECONDS` | `12` | Long speech without pauses is split at a short breath around this length |
 | `MODEL_SIZE` | `small` | Whisper model: `small` (~0.7 s per update), `base` (~0.3 s, mishears more), `medium` (slow). With `SOURCE_LANG=en` the English-only variant is used |
 | `WHISPER_THREADS` | `8` | CPU threads for Whisper |

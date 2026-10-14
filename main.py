@@ -9,6 +9,7 @@ import sys
 import threading
 import time
 
+import numpy as np
 from loguru import logger
 
 import config
@@ -39,26 +40,26 @@ def play_file(path: str, out: queue.Queue):
     out.put(None)
 
 
-MIN_CLAUSE_WORDS = 4
-SENTENCE_ENDINGS = (".", "!", "?", "…")
+# An entry that grew this long is closed at the next pause even if the sentence seems to go on.
+MAX_ENTRY_WORDS = 60
+# A last sentence longer than this is not heard again with the next line.
+MAX_CARRY_SECONDS = 10
+# Silence put between the carried sentence and the next line, where the pause was.
+GAP = np.zeros(int(0.3 * WHISPER_RATE), dtype=np.float32)
 
 
-def _continuation(previous: str, part: str) -> str:
-    """Clauses are translated on their own, so one from the middle of a sentence usually
-    comes back capitalised. Put it back in lower case."""
-    if not previous or not part or previous.rstrip().endswith(SENTENCE_ENDINGS) or not part[0].isupper():
-        return part
-    first = part.split()[0]
-    if len(first) > 1 and first.isupper():
-        return part  # an acronym, e.g. API
-    return part[0].lower() + part[1:]
-
-
-def _join_clauses(parts: list[str]) -> str:
-    text = ""
-    for part in parts:
-        text = f"{text} {_continuation(text, part)}".strip()
-    return text
+def _carry_verdict(words: list[str], carried: int, final: bool) -> bool | None:
+    """The next line is transcribed together with the carried sentence (`carried` words).
+    Whisper, hearing both, ends that sentence where it really ends: True if it went on
+    after the pause, False if it was complete, None if it is too early to tell."""
+    boundary = 0
+    for unit in split_units(words)[0]:
+        boundary += len(unit)
+        if abs(boundary - carried) <= 1:
+            return False
+    if final or len(words) >= carried + 3:
+        return True
+    return None
 
 
 def _find_unit_end(words: list[str], unit: list[str], start: int, slack: int = 3) -> int | None:
@@ -76,7 +77,8 @@ def _find_unit_end(words: list[str], unit: list[str], start: int, slack: int = 3
 
 
 class Pipeline:
-    def __init__(self, blocks: queue.Queue, segmenter: Segmenter, transcriber, translator, live_translator, on_entry):
+    def __init__(self, blocks: queue.Queue, segmenter: Segmenter, transcriber, translator, live_translator, on_entry,
+                 join_seconds: float):
         self.blocks = blocks
         self.segmenter = segmenter
         self.transcriber = transcriber
@@ -84,13 +86,24 @@ class Pipeline:
         # The line still being spoken may use a cheaper backend; see config.LIVE_BACKEND.
         self.live_translator = live_translator
         self.on_entry = on_entry
+        self.join_seconds = join_seconds
         self.stopped = threading.Event()
         self._failed_sources: set[str] = set()
         self._shown_partial = False
         self._last_audio_at = time.monotonic()
         self.stable = StableText()
         self._cache: dict[tuple[str, str, str], str] = {}
-        # Current line: (source, translation) units already frozen on screen.
+        # One entry on screen spans the lines of a sentence interrupted by pauses.
+        # Sentences of the open entry from earlier lines: (source, translation).
+        self._entry: list[tuple[str, str]] = []
+        # The last sentence of the previous line and its audio: it may go on after the pause,
+        # so it is transcribed again together with the next line.
+        self._carry = ""
+        self._carry_audio: np.ndarray | None = None
+        self._carry_since = 0.0
+        # Whether the current line turned out to continue the carried sentence (None: not known yet).
+        self._continues: bool | None = None
+        # Current line: (source, translation) sentences already frozen on screen.
         self._frozen: list[tuple[str, str]] = []
         self._shown = ("", "")
         self._language = transcriber.language or "en"
@@ -119,9 +132,10 @@ class Pipeline:
         """Translate one sentence. Cached, so a sentence already on screen keeps exactly the
         same translation when it is shown again (and DeepL is not billed twice)."""
         translator = self.live_translator if live else self.translator
-        if translator is None:
+        if translator is None or not text:
             return ""
-        key = (translator.name, language, " ".join(normalize_word(w) for w in text.split()))
+        # Punctuation is part of the key: "tight," and "tight." end different sentences.
+        key = (translator.name, language, " ".join(text.split()))
         if key in self._cache:
             return self._cache[key]
         try:
@@ -134,60 +148,103 @@ class Pipeline:
         self._cache[key] = translated
         return translated
 
+    def _show(self, sentences: list[tuple[str, str]], pending_source: str, pending: str, final: bool):
+        original = " ".join(source for source, _ in sentences + [(pending_source, "")]).strip()
+        done = " ".join(translated for _, translated in sentences).strip()
+        if not original:
+            if self._shown_partial:
+                self.on_entry("", "", "", True)
+                self._shown_partial = False
+            return
+        if final:
+            print(f"[{self._language}] {original}\n     {done}", flush=True)
+        self.on_entry(original, done, pending, final)
+        self._shown_partial = not final
+
+    def _close_entry(self):
+        """Commit the open entry: the carried sentence did not go on."""
+        sentences = self._entry + ([(self._carry, self._translate(self._carry, self._language))] if self._carry else [])
+        self._show(sentences, "", "", final=True)
+        self._entry, self._carry, self._carry_audio, self._continues = [], "", None, None
+        self._cache.clear()
+
     def _handle(self, segment: Segment):
         started = time.monotonic()
-        result = self.transcriber.transcribe(segment.audio, final=segment.final)
+        audio = segment.audio
+        if self._carry_audio is not None:
+            audio = np.concatenate([self._carry_audio, GAP, audio])
+        result = self.transcriber.transcribe(audio, final=segment.final)
         transcribed = time.monotonic()
 
         if result:
             self._language = result.language
+        if self._carry_audio is not None and self._continues is None:
+            # Someone is speaking again: no timeout until it is known whether the sentence goes on.
+            self._carry_since = time.monotonic()
+            if result:
+                self._continues = _carry_verdict(result.text.split(), len(self._carry.split()), segment.final)
+            if self._continues is False:
+                # A new sentence: commit the entry and hear this line on its own.
+                self._close_entry()
+                self.stable.reset()
+                self._frozen, self._shown = [], ("", "")
+                self._handle(segment)
+                return
+        text = result.text if result else ""
+
         if segment.final:
-            words = self._final_words(result.text.split() if result else [])
+            words = self._final_words(text.split())
         else:
-            words = self.stable.update(result.text if result else "").split()[len(self._frozen_words()):]
+            words = self.stable.update(text).split()[len(self._frozen_words()):]
             if not words and not self._frozen:
                 return
 
-        units, tail = split_units(words, MIN_CLAUSE_WORDS)
-        if segment.final:
-            units, tail = units + [tail] if tail else units, []
-        # Complete units are translated once and never change on screen again.
+        units, tail = split_units(words)
+        # Complete sentences are translated once and never change on screen again.
         for unit in units:
             source = " ".join(unit)
             self._frozen.append((source, self._translate(source, self._language)))
-        done_text = _join_clauses([translated for _, translated in self._frozen])
-        pending_text = _continuation(done_text, self._translate(" ".join(tail), self._language, live=True)) if tail else ""
-        original = " ".join(source for source, _ in self._frozen + [(" ".join(tail), "")]).strip()
+        tail_source = " ".join(tail)
 
-        if not segment.final and (done_text, pending_text) == self._shown:
-            return
-        self._shown = (done_text, pending_text)
+        if segment.final:
+            # The last sentence may go on after the pause, so it stays open (grey) for now.
+            if self._continues is None and self._carry:
+                # Nothing was heard: the carried sentence stays as it was.
+                self._frozen.insert(0, (self._carry, self._translate(self._carry, self._language)))
+            self._entry += self._frozen
+            self._frozen, self._shown = [], ("", "")
+            self.stable.reset()
+            self._carry, self._carry_audio, self._continues = tail_source, None, None
+            self._carry_since = time.monotonic()
+            if tail and result and result.starts:
+                start = max(0, int((result.starts[len(result.starts) - len(tail)] - 0.1) * WHISPER_RATE))
+                if len(audio) - start <= MAX_CARRY_SECONDS * WHISPER_RATE:
+                    self._carry_audio = audio[start:]
+            done_text, pending_text = "", self._translate(tail_source, self._language)
+            entry_words = sum(len(source.split()) for source, _ in self._entry) + len(tail)
+            if self._carry_audio is None or entry_words >= MAX_ENTRY_WORDS:
+                self._close_entry()
+            else:
+                self._show(self._entry, tail_source, pending_text, final=False)
+        else:
+            done_text = " ".join(translated for _, translated in self._frozen)
+            pending_text = self._translate(tail_source, self._language, live=True)
+            if (done_text, pending_text) == self._shown:
+                return
+            self._shown = (done_text, pending_text)
+            self._show(self._entry + self._frozen, tail_source, pending_text, final=False)
         logger.debug(
             "{} {:.1f}s audio: waited {:.2f}s, whisper {:.2f}s, translate {:.2f}s, lag {:.2f}s | {} ~ {}",
-            "final  " if segment.final else "partial", len(segment.audio) / WHISPER_RATE,
+            "final  " if segment.final else "partial", len(audio) / WHISPER_RATE,
             started - self._last_audio_at, transcribed - started, time.monotonic() - transcribed,
             time.monotonic() - self._last_audio_at, done_text[-50:], pending_text,
         )
-
-        if segment.final:
-            self.stable.reset()
-            self._frozen = []
-            self._shown = ("", "")
-            self._cache.clear()
-            if not original:
-                if self._shown_partial:
-                    self.on_entry("", "", "", True)
-                    self._shown_partial = False
-                return
-            print(f"[{self._language}] {original}\n     {done_text}", flush=True)
-        self.on_entry(original, done_text, pending_text, segment.final)
-        self._shown_partial = not segment.final
 
     def _frozen_words(self) -> list[str]:
         return " ".join(source for source, _ in self._frozen).split()
 
     def _final_words(self, final: list[str]) -> list[str]:
-        """Reconcile the final transcription with units already frozen on screen: keep those
+        """Reconcile the final transcription with sentences already frozen on screen: keep those
         that the final text still contains and return only the words after them."""
         position = 0
         kept = 0
@@ -197,7 +254,7 @@ class Pipeline:
             if end is None:
                 break
             position, kept = end, kept + 1
-        # Units the final text does not contain (a line split before them) are heard again in the next line.
+        # Sentences the final text does not contain (a line split before them) are heard again in the next line.
         self._frozen = self._frozen[:kept]
         return final[position:]
 
@@ -214,6 +271,11 @@ class Pipeline:
             while segment is not None:
                 self._handle(segment)
                 segment = self.segmenter.poll() if segment.final else None
+            # Nobody went on speaking: the carried sentence was complete.
+            if self._carry and self._continues is None and time.monotonic() - self._carry_since > self.join_seconds:
+                self._close_entry()
+        if self._entry or self._carry:
+            self._close_entry()
         logger.info("Audio stream finished")
 
 
@@ -291,7 +353,7 @@ def run(args) -> int:
     segmenter = Segmenter(config.PARTIAL_STEP_SECONDS, config.PAUSE_SECONDS, config.MAX_SEGMENT_SECONDS, config.SILENCE_THRESHOLD)
     pipeline = Pipeline(
         blocks, segmenter, transcriber, translator, live_translator,
-        overlay.update_entry if overlay else lambda *_: None,
+        overlay.update_entry if overlay else lambda *_: None, config.JOIN_PAUSE_SECONDS,
     )
 
     # 5. Start
