@@ -13,6 +13,8 @@ ENGLISH_ONLY_MODELS = {"tiny", "base", "small", "medium"}
 class Transcript:
     text: str
     language: str
+    # Start time in seconds of every word of `text`, only for final lines.
+    starts: list[float] | None = None
 
 
 class Transcriber:
@@ -41,9 +43,16 @@ class Transcriber:
             vad_filter=final,
             # Lines are independent; carrying context over tends to cause repetition loops.
             condition_on_previous_text=False,
-            without_timestamps=True,
+            # Word times let the last sentence of a final line be cut out and heard again with
+            # the next line, if it continues after a pause. They need segment timestamps: without
+            # them faster-whisper is 3x slower and makes up words at the end.
+            without_timestamps=not final,
+            word_timestamps=final,
         )
-        text = " ".join(s.text.strip() for s in segments).strip()
-        if not text:
+        if not final:
+            text = " ".join(s.text.strip() for s in segments).strip()
+            return Transcript(text=text, language=info.language) if text else None
+        words = [(w.word.strip(), w.start) for s in segments for w in s.words if w.word.strip()]
+        if not words:
             return None
-        return Transcript(text=text, language=info.language)
+        return Transcript(text=" ".join(w for w, _ in words), language=info.language, starts=[t for _, t in words])
