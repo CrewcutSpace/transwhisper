@@ -21,7 +21,7 @@ TAP_BINARY = TAP_DIR / "audiotap"
 PERMISSION_HINT = (
     "macOS is not letting this app hear the system audio.\n"
     "Fix: System Settings -> Privacy & Security -> Screen & System Audio Recording -> "
-    "enable your terminal (iTerm/Terminal), then restart the terminal.\n"
+    "enable transwhisper (or your terminal, iTerm/Terminal, if you start it from there), then restart it.\n"
     "(The permission is named after screen recording, but it also covers system audio.)\n"
     "Alternative: set AUDIO_SOURCE=device to capture via BlackHole instead."
 )
@@ -109,24 +109,39 @@ class SystemAudioCapture:
         self._process: subprocess.Popen | None = None
         self._worker: threading.Thread | None = None
         self._stop = threading.Event()
+        # Called with the permission hint when only silence (or nothing) arrives, and with "" once sound does.
+        self.on_warning = None
+        self._warned = False
+        self._blocks = 0
 
     def _read(self, rate: int):
         block_bytes = int(rate * BLOCK_SECONDS) * 4  # float32 mono
         silent_blocks = 0
-        warned = False
         assert self._process is not None and self._process.stdout is not None
         while not self._stop.is_set():
             data = self._process.stdout.read(block_bytes)
             if not data:
                 break
             block = np.frombuffer(data, dtype=np.float32)
-            if not warned:
+            self._blocks += 1
+            if not self._warned:
                 # Without the permission macOS delivers a stream of perfect silence.
                 silent_blocks = silent_blocks + 1 if not np.any(block) else 0
                 if silent_blocks > 5 / BLOCK_SECONDS:
-                    logger.warning(PERMISSION_HINT)
-                    warned = True
+                    self._warn()
+            elif self.on_warning and np.any(block):
+                # Sound after all: it was just quiet, or the permission was granted meanwhile.
+                self.on_warning("")
+                self.on_warning = None
             self.out.put(to_whisper_format(block, rate))
+
+    def _warn(self):
+        if self._warned:
+            return
+        self._warned = True
+        logger.warning(PERMISSION_HINT)
+        if self.on_warning:
+            self.on_warning(PERMISSION_HINT)
 
     def start(self):
         binary = build_tap()
@@ -138,6 +153,10 @@ class SystemAudioCapture:
         rate = int(json.loads(header)["rate"])
         self._worker = threading.Thread(target=self._read, args=(rate,), name="audio-tap", daemon=True)
         self._worker.start()
+        # The first time, macOS may hold the audio back until the permission is granted.
+        timer = threading.Timer(5, lambda: self._blocks or self._stop.is_set() or self._warn())
+        timer.daemon = True
+        timer.start()
         logger.info("Capturing the system audio @ {} Hz (no BlackHole needed)", rate)
 
     def stop(self):

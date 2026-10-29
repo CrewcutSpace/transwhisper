@@ -150,7 +150,25 @@ Defaults live in `config.py`.
   speech, so 1 000 000 characters last roughly **19 hours** of talking. Translating the live line with DeepL too
   (`LIVE_BACKEND=same`) costs ~3 500 characters per minute, about 4.7 hours.
 
-## 5. Run
+## 5. The app
+
+```sh
+app/build.sh        # builds /Applications/transwhisper.app (or: app/build.sh ~/Applications)
+```
+
+Then start **transwhisper** from Launchpad, Spotlight or Finder like any other app. It has no Dock icon: it shows
+its window and the `T` in the menu bar. The app runs the code from this folder with its `.venv`, so keep the folder
+where it is; after a `git pull` the app runs the new code, no rebuild needed (rebuild only after changes in `app/`).
+
+- The first time, allow it in **System Settings → Privacy & Security → Screen & System Audio Recording**
+  (transwhisper, under *System Audio Recording Only*), then quit it from the `T` menu and start it again. Until then
+  the window says that macOS is not letting it hear the audio. After a rebuild macOS may ask again.
+- **Translator** and **Translate into** in the `T` menu pick the translator (macOS or the local AI model) and the
+  language; the app restarts with the new choice and remembers it (`~/.local/share/transwhisper/settings.json`,
+  it wins over `.env`). Everything else is still set in `.env`.
+- There is no console: what it would print goes to `~/Library/Logs/transwhisper.log` (the last run).
+
+## 6. Run from the terminal
 
 ```sh
 python main.py                  # live capture

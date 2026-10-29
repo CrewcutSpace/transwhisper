@@ -1,11 +1,32 @@
 """All settings in one place. Every value can be overridden via environment
-variables or a .env file in the project root."""
+variables or a .env file in the project root. What is picked in the menu bar item
+(translator, target language) is saved to SETTINGS_FILE and wins over both."""
 
+import json
 import os
 from pathlib import Path
 
 from dotenv import load_dotenv
 
+SETTINGS_FILE = Path.home() / ".local/share/transwhisper/settings.json"
+
+
+def _load_settings() -> dict:
+    try:
+        return json.loads(SETTINGS_FILE.read_text())
+    except (OSError, ValueError):
+        return {}
+
+
+def save_setting(name: str, value: str):
+    """Remember a choice made in the menu; it applies from the next start."""
+    settings = _load_settings()
+    settings[name] = value
+    SETTINGS_FILE.parent.mkdir(parents=True, exist_ok=True)
+    SETTINGS_FILE.write_text(json.dumps(settings, indent=2))
+
+
+os.environ.update({name: str(value) for name, value in _load_settings().items()})
 load_dotenv()
 
 

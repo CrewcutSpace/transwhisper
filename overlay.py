@@ -9,7 +9,7 @@ from pathlib import Path
 
 from loguru import logger
 from PySide6.QtCore import QEvent, QObject, QRect, Qt, QTimer, QUrl, Signal
-from PySide6.QtGui import QAction, QColor, QDesktopServices, QGuiApplication, QIcon, QPainter, QPainterPath, QPen, QPixmap
+from PySide6.QtGui import QAction, QActionGroup, QColor, QDesktopServices, QGuiApplication, QIcon, QPainter, QPainterPath, QPen, QPixmap
 from PySide6.QtWidgets import QAbstractButton, QApplication, QHBoxLayout, QLabel, QSizeGrip, QMenu, QScrollArea, QSystemTrayIcon, QVBoxLayout, QWidget
 
 # Default size; the window can be resized from its bottom-right corner and keeps that size.
@@ -213,6 +213,8 @@ class Overlay(QWidget):
         self._followed_window = ""
         # Rows by entry id: an entry is updated in place until its last translation arrives.
         self._rows: dict[int, QWidget] = {}
+        # Set when a setting changed in the menu: the app quits and starts again with it.
+        self.restart_requested = False
         self._drag_offset = None
         self._bridge = _Bridge()
         self._bridge.entry.connect(self._update)
@@ -310,6 +312,43 @@ class Overlay(QWidget):
         self._tray.setContextMenu(self._menu)
         self._tray.activated.connect(lambda _reason: self._bring_back())
         self._tray.show()
+
+    def set_settings(self, backends: dict[str, str], backend: str, languages: dict[str, str], target: str):
+        """Menus to pick the translator and the target language. A choice is saved and the
+        app restarts with it (the models are loaded once, at start)."""
+        if getattr(self, "_menu", None) is None:
+            return
+        for title, setting, choices, current in (
+            ("Translator", "TRANSLATE_BACKEND", backends, backend),
+            ("Translate into", "TARGET_LANG", languages, target),
+        ):
+            submenu = QMenu(title, self._menu)
+            # Exclusive: exactly one choice stays ticked.
+            group = QActionGroup(submenu)
+            for value, label in choices.items():
+                action = submenu.addAction(label)
+                group.addAction(action)
+                action.setCheckable(True)
+                action.setChecked(value == current)
+                action.triggered.connect(
+                    lambda _checked, s=setting, v=value, c=current: self._change_setting(s, v, c)
+                )
+            self._menu.insertMenu(self._save_separator, submenu)
+        self._menu.insertSeparator(self._save_separator)
+
+    def _change_setting(self, setting: str, value: str, current: str):
+        if value == current:
+            return
+        import config
+
+        config.save_setting(setting, value)
+        logger.info("{} set to {}, restarting", setting, value)
+        self.restart_requested = True
+        QApplication.instance().quit()
+
+    def notice(self, text: str):
+        """Thread-safe. A grey line at the top of the feed (starting up, an error); empty text removes it."""
+        self.update_entry(-1, "", "", text)
 
     def set_transcript(self, transcript):
         """Menu items to switch saving the conversation on and off while it runs."""

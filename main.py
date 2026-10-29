@@ -3,11 +3,13 @@
 import argparse
 import contextlib
 import logging
+import os
 import queue
 import signal
 import sys
 import threading
 import time
+from types import SimpleNamespace
 
 import numpy as np
 from loguru import logger
@@ -26,7 +28,7 @@ from audio import (
 from stream import Segment, Segmenter, StableText, normalize_word, split_units
 from transcribe import Transcriber
 from transcript import Transcript
-from translate import TranslationError, create_translator
+from translate import LANGUAGE_NAMES, TranslationError, create_translator
 
 
 def play_file(path: str, out: queue.Queue):
@@ -408,55 +410,7 @@ def run(args) -> int:
         config.PARTIAL_STEP_SECONDS, config.PAUSE_SECONDS,
     )
 
-    blocks: queue.Queue = queue.Queue()
-
-    # 1. Audio source
-    capture = None
-    if args.file:
-        logger.info("Reading audio from file: {}", args.file)
-    else:
-        try:
-            capture = create_capture(blocks)
-        except (DeviceNotFoundError, TapUnavailableError) as exc:
-            logger.error("{}", exc)
-            return 1
-
-    # 2. Translation backends: one for the text that stays, a cheap one for the live line
-    translator = create_translator(
-        config.TRANSLATE_BACKEND, config.TARGET_LANG, config.DEEPL_API_KEY, config.ARGOS_DIR,
-        config.OLLAMA_MODEL, config.OLLAMA_URL,
-    )
-    live_backend = config.LIVE_BACKEND
-    if live_backend == "auto":
-        # DeepL bills per character and the live line is re-translated twice a second;
-        # a local LLM is too slow for it.
-        live_backend = {"deepl": "argos", "ollama": "apple"}.get(translator.name, "same")
-    live_translator = translator
-    if live_backend == "off":
-        live_translator = None
-    elif live_backend not in ("same", translator.name):
-        live_translator = create_translator(live_backend, config.TARGET_LANG, "", config.ARGOS_DIR)
-    if config.SOURCE_LANG != "auto":
-        try:
-            translator.prepare(config.SOURCE_LANG)
-            if live_translator is not None and live_translator is not translator:
-                live_translator.prepare(config.SOURCE_LANG)
-        except TranslationError as exc:
-            logger.error("{}", exc)
-            return 1
-    logger.info(
-        "Translation ready: {} for finished text, {} for the live line ({} -> {})",
-        translator.name, live_translator.name if live_translator else "none",
-        config.SOURCE_LANG, config.TARGET_LANG,
-    )
-
-    # 3. Whisper
-    logger.info("Loading Whisper model '{}' (first run downloads it)...", config.MODEL_SIZE)
-    transcriber = Transcriber(
-        config.MODEL_SIZE, config.WHISPER_DEVICE, config.WHISPER_COMPUTE_TYPE, config.WHISPER_THREADS, config.SOURCE_LANG
-    )
-
-    # 4. Output
+    # 1. Window first, so it is there while the models load (started from the app, there is no console)
     overlay = app = None
     if not args.no_overlay:
         from overlay import Overlay, create_app
@@ -467,35 +421,112 @@ def run(args) -> int:
             config.FOLLOW_WINDOW, config.SHOW_IN_DOCK,
         )
         overlay.show()
+        backends = {"apple": "macOS translator (fast)", "ollama": f"AI: {config.OLLAMA_MODEL} via Ollama (best)"}
+        if config.TRANSLATE_BACKEND not in backends:
+            backends[config.TRANSLATE_BACKEND] = config.TRANSLATE_BACKEND
+        overlay.set_settings(backends, config.TRANSLATE_BACKEND, LANGUAGE_NAMES, config.TARGET_LANG)
+        overlay.notice("Starting...")
 
     transcript = Transcript(config.TRANSCRIPT_DIR, config.SAVE_TRANSCRIPT or args.save, config.SOURCE_LANG, config.TARGET_LANG)
-
-    segmenter = Segmenter(config.PARTIAL_STEP_SECONDS, config.PAUSE_SECONDS, config.MAX_SEGMENT_SECONDS, config.SILENCE_THRESHOLD)
-    pipeline = Pipeline(
-        blocks, segmenter, transcriber, translator, live_translator,
-        overlay.update_entry if overlay else lambda *_: None, config.JOIN_PAUSE_SECONDS, transcript,
-    )
     if overlay:
         overlay.set_transcript(transcript)
 
-    # 5. Start
-    if args.file:
-        threading.Thread(target=play_file, args=(args.file, blocks), daemon=True).start()
-    else:
-        try:
-            capture.start()
-        except TapUnavailableError as exc:
-            logger.error("{}", exc)
-            return 1
+    blocks: queue.Queue = queue.Queue()
+    # What has been started so far, to stop it again; filled by start().
+    parts = SimpleNamespace(capture=None, translators=[], pipeline=None, failed=False)
 
-    logger.info("Running. Press Ctrl+C to stop.")
+    def fail(message: str):
+        logger.error("{}", message)
+        parts.failed = True
+        if overlay:
+            overlay.notice(message)
+
+    def start() -> Pipeline | None:
+        # 2. Audio source
+        if args.file:
+            logger.info("Reading audio from file: {}", args.file)
+        else:
+            try:
+                parts.capture = create_capture(blocks)
+            except (DeviceNotFoundError, TapUnavailableError) as exc:
+                return fail(str(exc))
+            if overlay:
+                parts.capture.on_warning = overlay.notice
+
+        # 3. Translation backends: one for the text that stays, a cheap one for the live line
+        translator = create_translator(
+            config.TRANSLATE_BACKEND, config.TARGET_LANG, config.DEEPL_API_KEY, config.ARGOS_DIR,
+            config.OLLAMA_MODEL, config.OLLAMA_URL,
+        )
+        parts.translators.append(translator)
+        live_backend = config.LIVE_BACKEND
+        if live_backend == "auto":
+            # DeepL bills per character and the live line is re-translated twice a second;
+            # a local LLM is too slow for it.
+            live_backend = {"deepl": "argos", "ollama": "apple"}.get(translator.name, "same")
+        live_translator = translator
+        if live_backend == "off":
+            live_translator = None
+        elif live_backend not in ("same", translator.name):
+            live_translator = create_translator(live_backend, config.TARGET_LANG, "", config.ARGOS_DIR)
+            parts.translators.append(live_translator)
+        if config.SOURCE_LANG != "auto":
+            try:
+                translator.prepare(config.SOURCE_LANG)
+                if live_translator is not None and live_translator is not translator:
+                    live_translator.prepare(config.SOURCE_LANG)
+            except TranslationError as exc:
+                return fail(str(exc))
+        logger.info(
+            "Translation ready: {} for finished text, {} for the live line ({} -> {})",
+            translator.name, live_translator.name if live_translator else "none",
+            config.SOURCE_LANG, config.TARGET_LANG,
+        )
+
+        # 4. Whisper
+        logger.info("Loading Whisper model '{}' (first run downloads it)...", config.MODEL_SIZE)
+        transcriber = Transcriber(
+            config.MODEL_SIZE, config.WHISPER_DEVICE, config.WHISPER_COMPUTE_TYPE, config.WHISPER_THREADS, config.SOURCE_LANG
+        )
+
+        segmenter = Segmenter(config.PARTIAL_STEP_SECONDS, config.PAUSE_SECONDS, config.MAX_SEGMENT_SECONDS, config.SILENCE_THRESHOLD)
+        parts.pipeline = Pipeline(
+            blocks, segmenter, transcriber, translator, live_translator,
+            overlay.update_entry if overlay else lambda *_: None, config.JOIN_PAUSE_SECONDS, transcript,
+        )
+
+        # 5. Start
+        if args.file:
+            threading.Thread(target=play_file, args=(args.file, blocks), daemon=True).start()
+        else:
+            try:
+                parts.capture.start()
+            except TapUnavailableError as exc:
+                return fail(str(exc))
+
+        if overlay:
+            # Say so when the chosen translator could not be used, otherwise clear "Starting...".
+            fallback = translator.name != config.TRANSLATE_BACKEND
+            overlay.notice(
+                f"{config.TRANSLATE_BACKEND} is not available, using {translator.name} (details in the log)"
+                if fallback else ""
+            )
+        logger.info("Running. Press Ctrl+C to stop.")
+        return parts.pipeline
+
+    def work():
+        pipeline = start()
+        if pipeline is not None:
+            pipeline.run()
+
     try:
         if app is None:
-            pipeline.run()
+            work()
         else:
             from PySide6.QtCore import QTimer
 
-            worker = threading.Thread(target=pipeline.run, name="pipeline", daemon=True)
+            # Loads the models and then runs the pipeline, while the window stays responsive.
+            worker = threading.Thread(target=logger.catch(work), name="pipeline", daemon=True)
             worker.start()
             signal.signal(signal.SIGINT, lambda *_: app.quit())
             # Qt's event loop blocks Python signal handling; wake the interpreter periodically.
@@ -508,16 +539,20 @@ def run(args) -> int:
     finally:
         # Ctrl+C can land again while we are already shutting down.
         with contextlib.suppress(KeyboardInterrupt):
-            if capture:
-                capture.stop()
-            pipeline.stop()
+            if parts.capture:
+                parts.capture.stop()
+            if parts.pipeline:
+                parts.pipeline.stop()
             transcript.close()
-            for backend in (translator, live_translator):
+            for backend in parts.translators:
                 close = getattr(backend, "close", None)
                 if close:
                     close()
         logger.info("Stopped.")
-    return 0
+    if overlay and overlay.restart_requested:
+        # A setting changed in the menu: start again with it (same process, so the app stays one app).
+        os.execv(sys.executable, [sys.executable, *sys.argv])
+    return 1 if parts.failed and app is None else 0
 
 
 @logger.catch(exclude=KeyboardInterrupt)
