@@ -1,4 +1,4 @@
-"""Pluggable translation backends: DeepL (API) and Argos (local, offline)."""
+"""Pluggable translation backends: macOS, a local LLM (Ollama), DeepL (API) and Argos (local, offline)."""
 
 import json
 import re
@@ -7,6 +7,7 @@ import subprocess
 import time
 import urllib.request
 import zipfile
+from collections import deque
 from pathlib import Path
 from typing import Protocol
 
@@ -23,6 +24,8 @@ class TranslationError(RuntimeError):
 
 class Translator(Protocol):
     name: str
+    # A slow backend (a local LLM) runs in the background; the live backend fills in meanwhile.
+    slow: bool
 
     def prepare(self, source: str) -> None:
         """Make sure the source->target pair is usable (download models, check support)."""
@@ -77,6 +80,7 @@ class ArgosTranslator:
     Packages are downloaded on demand; pairs without a direct model pivot through English."""
 
     name = "argos"
+    slow = False
 
     def __init__(self, target: str, models_dir: Path):
         self.target = target
@@ -189,6 +193,7 @@ class AppleTranslator:
     helper because the framework has no Python bindings."""
 
     name = "apple"
+    slow = False
 
     def __init__(self, target: str):
         self.target = target
@@ -264,6 +269,7 @@ _DEEPL_TARGET_VARIANTS = {"en": "EN-US", "pt": "PT-BR", "zh": "ZH-HANS"}
 
 class DeepLTranslator:
     name = "deepl"
+    slow = False
 
     def __init__(self, target: str, api_key: str):
         import deepl
@@ -300,7 +306,90 @@ class DeepLTranslator:
             raise TranslationError(f"DeepL request failed: {exc}") from exc
 
 
-def create_translator(backend: str, target: str, api_key: str, argos_dir: Path) -> Translator:
+# --- Local LLM (Ollama) -----------------------------------------------------
+
+LANGUAGE_NAMES = {
+    "en": "English", "uk": "Ukrainian", "de": "German", "pl": "Polish", "es": "Spanish", "fr": "French",
+    "it": "Italian", "pt": "Portuguese", "nl": "Dutch", "cs": "Czech", "tr": "Turkish", "ru": "Russian",
+    "ja": "Japanese", "ko": "Korean", "zh": "Chinese", "ar": "Arabic", "he": "Hebrew", "hi": "Hindi",
+}
+
+OLLAMA_PROMPT = (
+    "You translate a live video call from {source} into {target}. Translate only the sentence after "
+    "\"Sentence:\"; the lines after \"Context:\" were said just before it and are there only to get gender, "
+    "terms and meaning right. Speech recognition may have misheard a word: translate what was most likely meant. "
+    "Use natural spoken {target}, the way people actually talk at work; translate idioms by meaning, not word "
+    "by word. Keep names, product names and common IT terms the way {target}-speaking IT people say them. "
+    "Reply with the translation only, no quotes, notes or alternatives."
+)
+
+
+class OllamaTranslator:
+    """A local LLM served by Ollama (https://ollama.com): much better than the macOS translator with
+    idioms, jargon and context, but ~0.5-1.5 s per sentence, so it runs in the background."""
+
+    name = "ollama"
+    slow = True
+
+    def __init__(self, target: str, model: str, url: str, context_sentences: int = 3):
+        self.target = target
+        self.model = model
+        self.url = url.rstrip("/")
+        self._context: deque[str] = deque(maxlen=context_sentences)
+
+    def _request(self, path: str, body: dict | None = None, timeout: float = 60) -> dict:
+        data = json.dumps(body).encode() if body is not None else None
+        request = urllib.request.Request(f"{self.url}{path}", data=data, headers={"Content-Type": "application/json"})
+        try:
+            with urllib.request.urlopen(request, timeout=timeout) as response:
+                return json.loads(response.read())
+        except OSError as exc:
+            raise TranslationError(f"Ollama at {self.url} is not reachable: {exc}. Is Ollama running?") from exc
+
+    def check(self) -> None:
+        installed = {m["name"] for m in self._request("/api/tags", timeout=5).get("models", [])}
+        if self.model not in installed and f"{self.model}:latest" not in installed:
+            raise TranslationError(f"Ollama has no model '{self.model}'. Fix: ollama pull {self.model}")
+
+    def prepare(self, source: str) -> None:
+        logger.info("Loading {} into Ollama (first time after a restart takes a few seconds)...", self.model)
+        self.translate("Hello.", source)
+        self._context.clear()
+
+    def translate(self, text: str, source: str) -> str:
+        if source == self.target:
+            return text
+        system = OLLAMA_PROMPT.format(
+            source=LANGUAGE_NAMES.get(source, source), target=LANGUAGE_NAMES.get(self.target, self.target)
+        )
+        context = "\n".join(self._context)
+        body = {
+            "model": self.model,
+            "messages": [
+                {"role": "system", "content": system},
+                {"role": "user", "content": (f"Context:\n{context}\n\n" if context else "") + f"Sentence:\n{text}"},
+            ],
+            "stream": False,
+            "think": False,
+            # Keep the model in memory for the whole call.
+            "keep_alive": "60m",
+            "options": {"temperature": 0},
+        }
+        answer = self._request("/api/chat", body)
+        self._context.append(text)
+        return answer.get("message", {}).get("content", "").strip()
+
+
+def create_translator(backend: str, target: str, api_key: str, argos_dir: Path,
+                      ollama_model: str = "", ollama_url: str = "") -> Translator:
+    if backend == "ollama":
+        try:
+            translator = OllamaTranslator(target, ollama_model, ollama_url)
+            translator.check()
+            return translator
+        except TranslationError as exc:
+            logger.warning("{}\nFalling back to the macOS translator.", exc)
+            backend = "apple"
     if backend == "apple":
         try:
             return AppleTranslator(target)

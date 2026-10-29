@@ -8,8 +8,8 @@ import subprocess
 from pathlib import Path
 
 from loguru import logger
-from PySide6.QtCore import QEvent, QObject, QRect, Qt, QTimer, Signal
-from PySide6.QtGui import QColor, QGuiApplication, QIcon, QPainter, QPainterPath, QPen, QPixmap
+from PySide6.QtCore import QEvent, QObject, QRect, Qt, QTimer, QUrl, Signal
+from PySide6.QtGui import QAction, QColor, QDesktopServices, QGuiApplication, QIcon, QPainter, QPainterPath, QPen, QPixmap
 from PySide6.QtWidgets import QAbstractButton, QApplication, QHBoxLayout, QLabel, QSizeGrip, QMenu, QScrollArea, QSystemTrayIcon, QVBoxLayout, QWidget
 
 # Default size; the window can be resized from its bottom-right corner and keeps that size.
@@ -94,9 +94,16 @@ class _TitleBar(QWidget):
         row.addWidget(self.minimise_button)
         self._buttons.setAttribute(Qt.WidgetAttribute.WA_Hover)
         self._buttons.installEventFilter(self)
+        # Shown while the conversation is being saved, so it is not left on by mistake.
+        self.saving = QLabel("● saving", self)
+        self.saving.setStyleSheet("color: #ff5f57; font-size: 11px; background: transparent;")
+        self.saving.setToolTip("The conversation is being saved to a file (menu bar item to stop)")
+        self.saving.hide()
         layout = QHBoxLayout(self)
         layout.setContentsMargins(12, 10, 12, 0)
         layout.addWidget(self._buttons)
+        layout.addSpacing(10)
+        layout.addWidget(self.saving)
         layout.addStretch(1)
 
     def eventFilter(self, watched, event):
@@ -171,7 +178,7 @@ def find_window(patterns: str) -> dict | None:
 class _Bridge(QObject):
     """Carries entries from worker threads to the GUI thread."""
 
-    entry = Signal(str, str, str, bool)
+    entry = Signal(int, str, str, str)
 
 
 class Overlay(QWidget):
@@ -204,7 +211,8 @@ class Overlay(QWidget):
         self.follow_window = follow_window
         self._following = True
         self._followed_window = ""
-        self._pending: QLabel | None = None  # line still being spoken, updated in place
+        # Rows by entry id: an entry is updated in place until its last translation arrives.
+        self._rows: dict[int, QWidget] = {}
         self._drag_offset = None
         self._bridge = _Bridge()
         self._bridge.entry.connect(self._update)
@@ -243,7 +251,8 @@ class Overlay(QWidget):
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 2, 2)
         layout.setSpacing(0)
-        layout.addWidget(_TitleBar(QApplication.instance().quit, self.hide, self))
+        self._title_bar = _TitleBar(QApplication.instance().quit, self.hide, self)
+        layout.addWidget(self._title_bar)
         layout.addWidget(self._scroll)
         grip = QSizeGrip(self)
         grip.setStyleSheet("background: transparent;")
@@ -293,6 +302,7 @@ class Overlay(QWidget):
         self._menu.addAction("Move to the call window", self._follow_again)
         self._menu.addAction("Reset the position and size", self._reset_position)
         self._menu.addSeparator()
+        self._save_separator = self._menu.addSeparator()
         self._menu.addAction("Quit", QApplication.instance().quit)
 
         self._tray = QSystemTrayIcon(image, self)
@@ -300,6 +310,32 @@ class Overlay(QWidget):
         self._tray.setContextMenu(self._menu)
         self._tray.activated.connect(lambda _reason: self._bring_back())
         self._tray.show()
+
+    def set_transcript(self, transcript):
+        """Menu items to switch saving the conversation on and off while it runs."""
+        self._transcript = transcript
+        if getattr(self, "_menu", None) is None:
+            return
+        save = QAction("Save the conversation", self._menu)
+        save.setCheckable(True)
+        save.setChecked(transcript.enabled)
+        save.toggled.connect(self._toggle_saving)
+        folder = QAction("Open the saved conversations", self._menu)
+        folder.triggered.connect(self._open_transcripts)
+        self._menu.insertActions(self._save_separator, [save, folder])
+        self._show_saving(transcript.enabled)
+
+    def _toggle_saving(self, enabled: bool):
+        self._transcript.set_enabled(enabled)
+        self._show_saving(enabled)
+
+    def _show_saving(self, enabled: bool):
+        self._title_bar.saving.setVisible(enabled)
+        self._tray.setToolTip("transwhisper: saving the conversation" if enabled else "transwhisper")
+
+    def _open_transcripts(self):
+        self._transcript.directory.mkdir(parents=True, exist_ok=True)
+        QDesktopServices.openUrl(QUrl.fromLocalFile(str(self._transcript.directory)))
 
     def _bring_back(self):
         if not self.isVisible():
@@ -426,10 +462,11 @@ class Overlay(QWidget):
 
     # --- feed --------------------------------------------------------------
 
-    def update_entry(self, original: str, done: str, pending: str, final: bool):
-        """Thread-safe. `done` sentences will not change any more (white), `pending` is the
-        sentence still being spoken (grey). Partial updates replace the current line; a final one commits it."""
-        self._bridge.entry.emit(original, done, pending, final)
+    def update_entry(self, entry_id: int, original: str, done: str, pending: str):
+        """Thread-safe. Shows or updates entry `entry_id`: `done` will not change any more (white),
+        `pending` still may (grey: being spoken, or waiting for the final translation).
+        Empty text removes the entry (it turned out to be noise)."""
+        self._bridge.entry.emit(entry_id, original, done, pending)
 
     def _new_row(self) -> QWidget:
         """One entry: the translation, with the original in a column to its left if shown."""
@@ -461,26 +498,25 @@ class Overlay(QWidget):
                 f'<div style="font-size:15px; color:{theme["original"]};">{html.escape(original)}</div>'
             )
 
-    def _update(self, original: str, done: str, pending: str, final: bool):
+    def _update(self, entry_id: int, original: str, done: str, pending: str):
+        row = self._rows.get(entry_id)
         if not (done + pending).strip():
             # The line turned out to be noise: drop whatever partial text was shown.
-            if final and self._pending is not None:
-                self._pending.deleteLater()
-                self._pending = None
+            if row is not None:
+                self._rows.pop(entry_id).deleteLater()
             return
-        if self._pending is None:
-            self._pending = self._new_row()
-            self._feed.insertWidget(self._feed.count() - 1, self._pending)
+        if row is None:
+            row = self._rows[entry_id] = self._new_row()
+            self._feed.insertWidget(self._feed.count() - 1, row)
 
-        self._pending.setProperty("entry", (original, done, pending))
-        self._fill(self._pending, original, done, pending)
-        if final:
-            self._pending = None
+        row.setProperty("entry", (original, done, pending))
+        self._fill(row, original, done, pending)
 
         # The last item is the stretch; the oldest entry is the first one.
         while self._feed.count() - 1 > self.max_entries:
-            item = self._feed.takeAt(0)
-            item.widget().deleteLater()
+            widget = self._feed.takeAt(0).widget()
+            self._rows = {key: value for key, value in self._rows.items() if value is not widget}
+            widget.deleteLater()
 
     # --- dragging ----------------------------------------------------------
 

@@ -50,13 +50,19 @@ SOURCE_LANG = _get("SOURCE_LANG", "en").lower()
 # --- Translation -----------------------------------------------------------
 TARGET_LANG = _get("TARGET_LANG", "uk").lower()
 DEEPL_API_KEY = os.getenv("DEEPL_API_KEY", "").strip()
-# apple: the translator built into macOS (free, offline, best quality of the free options)
-# argos: local models, weaker | deepl: best quality, needs a key and has a character quota
+# apple: the translator built into macOS (free, offline, instant)
+# ollama: a local LLM (best with idioms and context, ~1 s per sentence, needs Ollama running)
+# argos: local models, weaker | deepl: very good, needs a key and has a character quota
 TRANSLATE_BACKEND = _get("TRANSLATE_BACKEND", "deepl" if DEEPL_API_KEY else "apple").lower()
 # Backend for the grey line that is still being spoken: it is re-translated twice a second,
-# which would burn DeepL's character quota ~4x faster. auto | same | argos | apple | off
-# auto = the main backend, unless that is DeepL, in which case local Argos.
+# which would burn DeepL's character quota ~4x faster and is too much for a local LLM.
+# auto | same | argos | apple | off
+# auto = the main backend, unless that is DeepL (then Argos) or Ollama (then apple).
 LIVE_BACKEND = _get("LIVE_BACKEND", "auto").lower()
+# Ollama model and server for TRANSLATE_BACKEND=ollama. gemma3:12b translates best of the ones
+# tried; gemma3:4b is ~3x faster but takes liberties. Install with: ollama pull gemma3:12b
+OLLAMA_MODEL = _get("OLLAMA_MODEL", "gemma3:12b")
+OLLAMA_URL = _get("OLLAMA_URL", "http://localhost:11434")
 # Where downloaded Argos models are stored.
 ARGOS_DIR = Path(_get("ARGOS_DIR", str(Path.home() / ".local/share/transwhisper/argos"))).expanduser()
 
@@ -72,3 +78,9 @@ FOLLOW_WINDOW = _get("FOLLOW_WINDOW", "Meet,Zoom,Teams,Safari,Chrome,Brave,Arc,F
 SHOW_IN_DOCK = _flag("SHOW_IN_DOCK", False)
 # Show the original (e.g. English) text in a column to the left of the translation.
 SHOW_ORIGINAL = _flag("SHOW_ORIGINAL", True)
+
+# --- Saving the conversation -----------------------------------------------
+# Append every finished line (original + translation) to a text file, one per run.
+# Off by default; can also be switched on with --save or from the menu bar item.
+SAVE_TRANSCRIPT = _flag("SAVE_TRANSCRIPT", False)
+TRANSCRIPT_DIR = Path(_get("TRANSCRIPT_DIR", str(Path.home() / "Documents/transwhisper"))).expanduser()

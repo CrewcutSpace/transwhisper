@@ -93,8 +93,10 @@ Defaults live in `config.py`.
 | `WHISPER_THREADS` | `8` | CPU threads for Whisper |
 | `SOURCE_LANG` | `en` | Language spoken in the call, or `auto` to detect it per line |
 | `TARGET_LANG` | `uk` | Language to translate into (`de`, `pl`, `es`, ...) |
-| `TRANSLATE_BACKEND` | `apple`, or `deepl` if a key is set | Translation backend: `apple` (macOS), `argos`, `deepl` |
+| `TRANSLATE_BACKEND` | `apple`, or `deepl` if a key is set | Translation backend: `apple` (macOS), `ollama` (local LLM), `argos`, `deepl` |
 | `LIVE_BACKEND` | `auto` | Backend for the line still being spoken: `auto`, `same`, `argos`, `apple`, `off` |
+| `OLLAMA_MODEL` | `gemma3:12b` | Model for `TRANSLATE_BACKEND=ollama` |
+| `OLLAMA_URL` | `http://localhost:11434` | Ollama server |
 | `DEEPL_API_KEY` | — | DeepL API key (free tier), only from env/.env |
 | `ARGOS_DIR` | `~/.local/share/transwhisper/argos` | Where Argos models are downloaded |
 | `MAX_ENTRIES` | `500` | Lines kept in the window (scroll up to read them) |
@@ -102,6 +104,8 @@ Defaults live in `config.py`.
 | `FOLLOW_WINDOW` | `Meet,Zoom,Teams,Safari,Chrome,...` | Windows to sit next to, best match first; re-checked every 3 s |
 | `SHOW_IN_DOCK` | `0` | `1` adds a Dock icon, but macOS then keeps the window out of full-screen Spaces |
 | `SHOW_ORIGINAL` | `1` | original on the left, translation on the right; `0` shows only the translation |
+| `SAVE_TRANSCRIPT` | `0` | `1` saves the conversation (original + translation) to a text file; also `--save` or the menu bar item |
+| `TRANSCRIPT_DIR` | `~/Documents/transwhisper` | Where conversations are saved, one file per run |
 
 ### Translation backends
 
@@ -111,6 +115,23 @@ Defaults live in `config.py`.
   says so and falls back to Argos if the pair is missing. Needs macOS 15+ and the Xcode command line tools.
   The helper (`appletranslate/`) is built on first run. With `SOURCE_LANG=auto` the language Whisper reports for
   each line is used; a pair whose language pack is missing falls back to the text being left untranslated.
+- **Local LLM** (`ollama`, best quality offline): a language model run by [Ollama](https://ollama.com) on
+  your own machine. Unlike the macOS translator it translates idioms and jargon by meaning ("let's take this
+  offline" → «обговоримо в окремій розмові», not «відвеземо це в автономний режим») and sees the previous
+  sentences, so gender and terms stay right. Nothing leaves the computer.
+
+  ```sh
+  brew install ollama        # or the app from ollama.com; it has to be running
+  ollama pull gemma3:12b     # ~8 GB, one time
+  TRANSLATE_BACKEND=ollama python main.py
+  ```
+
+  It takes ~1.3 s per sentence on an M3 Max, so it works in the background: a finished sentence first appears
+  grey with the macOS translation and turns white when the model's translation arrives. Measured on call-like
+  English, `gemma3:12b` translated best; `gemma3:4b` (~0.5 s) is faster but adds things of its own; `qwen3:14b`
+  was worse than the macOS translator in Ukrainian. Avoid "thinking" models such as `deepseek-r1`: they spend
+  seconds reasoning before every sentence. If Ollama is not running or the model is missing, the app says so and
+  uses the macOS translator.
 - **Argos** (`argos`, no key needed): local models, weaker quality. The model for the language pair (~70–100 MB)
   is downloaded on first run. If there is no direct model for a pair, it translates through English.
 - **DeepL** (better quality, needs internet): create a free API account at <https://www.deepl.com/pro-api>
@@ -137,7 +158,16 @@ python main.py --list-devices   # show input devices
 python main.py --file talk.wav  # play an audio file through the pipeline in real time (testing)
 python main.py --no-overlay     # stdout only, no window
 python main.py -v               # debug logging (latency of every update)
+python main.py --save           # also save the conversation to a text file
 ```
+
+### Saving the conversation
+
+Off by default. Switch it on with `--save`, `SAVE_TRANSCRIPT=1`, or at any time during a call with
+**Save the conversation** in the menu bar item (the same menu has *Open the saved conversations*).
+While it is on, the window shows a red **● saving**. Every finished line is written right away to
+`~/Documents/transwhisper/<date>_<time>.txt`, with the time it was spoken, so nothing is lost if the app is
+closed mid-call. Only the text is saved, not the audio.
 
 Stop with **Ctrl+C**.
 

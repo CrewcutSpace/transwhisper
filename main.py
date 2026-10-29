@@ -25,6 +25,7 @@ from audio import (
 )
 from stream import Segment, Segmenter, StableText, normalize_word, split_units
 from transcribe import Transcriber
+from transcript import Transcript
 from translate import TranslationError, create_translator
 
 
@@ -32,12 +33,17 @@ def play_file(path: str, out: queue.Queue):
     """Feed an audio file into the pipeline at real-time speed, like live capture (for testing)."""
     from faster_whisper import decode_audio
 
-    audio = decode_audio(path, sampling_rate=WHISPER_RATE)
-    step = int(BLOCK_SECONDS * WHISPER_RATE)
-    for start in range(0, len(audio), step):
-        out.put(audio[start:start + step])
-        time.sleep(BLOCK_SECONDS)
-    out.put(None)
+    try:
+        audio = decode_audio(path, sampling_rate=WHISPER_RATE)
+        step = int(BLOCK_SECONDS * WHISPER_RATE)
+        for start in range(0, len(audio), step):
+            out.put(audio[start:start + step])
+            time.sleep(BLOCK_SECONDS)
+    except Exception as exc:
+        logger.error("Could not read {}: {}", path, exc)
+    finally:
+        # Ends the pipeline, also when the file could not be read.
+        out.put(None)
 
 
 # An entry that grew this long is closed at the next pause even if the sentence seems to go on.
@@ -76,9 +82,13 @@ def _find_unit_end(words: list[str], unit: list[str], start: int, slack: int = 3
     return None
 
 
+# Stands in the translation cache for a sentence the slow backend failed on.
+FAILED = object()
+
+
 class Pipeline:
     def __init__(self, blocks: queue.Queue, segmenter: Segmenter, transcriber, translator, live_translator, on_entry,
-                 join_seconds: float):
+                 join_seconds: float, transcript: Transcript):
         self.blocks = blocks
         self.segmenter = segmenter
         self.transcriber = transcriber
@@ -87,15 +97,25 @@ class Pipeline:
         self.live_translator = live_translator
         self.on_entry = on_entry
         self.join_seconds = join_seconds
+        self.transcript = transcript
         self.stopped = threading.Event()
         self._failed_sources: set[str] = set()
-        self._shown_partial = False
         self._last_audio_at = time.monotonic()
         self.stable = StableText()
-        self._cache: dict[tuple[str, str, str], str] = {}
+        # Translations by (language, sentence). Final ones are kept while an entry waits for them.
+        self._live_cache: dict[tuple[str, str], str] = {}
+        self._final: dict[tuple[str, str], object] = {}
+        # A slow main backend (a local LLM) translates finished sentences in the background, in order;
+        # meanwhile they are shown grey with the live translation.
+        self._jobs: queue.Queue = queue.Queue()
+        self._queued: set[tuple[str, str]] = set()
+        self._upgraded = threading.Event()
+        if getattr(translator, "slow", False):
+            threading.Thread(target=self._translate_in_background, name="translate", daemon=True).start()
         # One entry on screen spans the lines of a sentence interrupted by pauses.
-        # Sentences of the open entry from earlier lines: (source, translation).
-        self._entry: list[tuple[str, str]] = []
+        self._id = 0
+        # Source sentences of the open entry from earlier lines.
+        self._entry: list[str] = []
         # The last sentence of the previous line and its audio: it may go on after the pause,
         # so it is transcribed again together with the next line.
         self._carry = ""
@@ -103,10 +123,16 @@ class Pipeline:
         self._carry_since = 0.0
         # Whether the current line turned out to continue the carried sentence (None: not known yet).
         self._continues: bool | None = None
-        # Current line: (source, translation) sentences already frozen on screen.
-        self._frozen: list[tuple[str, str]] = []
-        self._shown = ("", "")
+        # Current line: source sentences already frozen on screen.
+        self._frozen: list[str] = []
         self._language = transcriber.language or "en"
+        # What each entry shows (original, done, pending), and when it started.
+        self._rendered: dict[int, tuple[str, str, str]] = {}
+        self._started: dict[int, float] = {}
+        # The open entry as last shown, to show it again when a translation arrives.
+        self._open_view: tuple[list[str], str, str] = ([], "", "")
+        # Closed entries still waiting for final translations: id -> (sentences, language).
+        self._waiting: dict[int, tuple[list[str], str]] = {}
 
     def stop(self):
         self.stopped.set()
@@ -128,45 +154,128 @@ class Pipeline:
             except queue.Empty:
                 return True
 
-    def _translate(self, text: str, language: str, live: bool = False) -> str:
-        """Translate one sentence. Cached, so a sentence already on screen keeps exactly the
-        same translation when it is shown again (and DeepL is not billed twice)."""
-        translator = self.live_translator if live else self.translator
-        if translator is None or not text:
-            return ""
-        # Punctuation is part of the key: "tight," and "tight." end different sentences.
-        key = (translator.name, language, " ".join(text.split()))
-        if key in self._cache:
-            return self._cache[key]
+    def _call(self, translator, text: str, language: str) -> str:
         try:
-            translated = translator.translate(text, language)
+            return translator.translate(text, language)
         except TranslationError as exc:
-            if language not in self._failed_sources:
+            if (translator.name, language) not in self._failed_sources:
                 logger.error("{}", exc)
-                self._failed_sources.add(language)
-            return f"[{language}] {text}"
-        self._cache[key] = translated
-        return translated
+                self._failed_sources.add((translator.name, language))
+            raise
 
-    def _show(self, sentences: list[tuple[str, str]], pending_source: str, pending: str, final: bool):
-        original = " ".join(source for source, _ in sentences + [(pending_source, "")]).strip()
-        done = " ".join(translated for _, translated in sentences).strip()
+    @staticmethod
+    def _key(text: str, language: str) -> tuple[str, str]:
+        # Punctuation is part of the key: "tight," and "tight." end different sentences.
+        return language, " ".join(text.split())
+
+    def _live(self, text: str, language: str) -> str:
+        """Quick translation of text that may still change (cached: shown again unchanged)."""
+        if self.live_translator is None or not text:
+            return ""
+        key = self._key(text, language)
+        if key not in self._live_cache:
+            try:
+                self._live_cache[key] = self._call(self.live_translator, text, language)
+            except TranslationError:
+                return f"[{language}] {text}"
+        return self._live_cache[key]
+
+    def _sentence(self, text: str, language: str) -> tuple[str, bool]:
+        """The translation of a finished sentence, and whether it is final. A slow backend's
+        translation is requested in the background; until it arrives the live one stands in."""
+        key = self._key(text, language)
+        if key not in self._final and not getattr(self.translator, "slow", False):
+            try:
+                self._final[key] = self._call(self.translator, text, language)
+            except TranslationError:
+                self._final[key] = FAILED
+        if key in self._final:
+            value = self._final[key]
+            if value is FAILED:
+                return self._live(text, language) or f"[{language}] {text}", True
+            return value, True
+        if key not in self._queued:
+            self._queued.add(key)
+            self._jobs.put(key)
+        return self._live(text, language), False
+
+    def _translate_in_background(self):
+        while True:
+            key = self._jobs.get()
+            language, text = key
+            try:
+                self._final[key] = self._call(self.translator, text, language)
+            except TranslationError:
+                self._final[key] = FAILED
+            except Exception:
+                logger.exception("Background translation failed")
+                self._final[key] = FAILED
+            self._queued.discard(key)
+            self._upgraded.set()
+            self._jobs.task_done()
+
+    def _render(self, entry_id: int, sentences: list[str], tail_source: str, tail: str, language: str) -> bool:
+        """Show an entry: white up to the first sentence still waiting for its final translation,
+        grey after it. Returns True when nothing in it can change any more."""
+        done: list[str] = []
+        pending: list[str] = []
+        for sentence in sentences:
+            translated, final = self._sentence(sentence, language)
+            (done if final and not pending else pending).append(translated)
+        state = (" ".join(sentences + [tail_source]).strip(), " ".join(done), " ".join(pending + [tail]).strip())
+        if not state[0]:
+            if entry_id in self._rendered:
+                self.on_entry(entry_id, "", "", "")
+                del self._rendered[entry_id]
+            return True
+        if entry_id not in self._rendered:
+            self._started[entry_id] = time.time()
+        if self._rendered.get(entry_id) != state:
+            self._rendered[entry_id] = state
+            self.on_entry(entry_id, *state)
+        return not pending and not tail_source
+
+    def _commit(self, entry_id: int):
+        """An entry is final: print it and save it."""
+        original, done, pending = self._rendered.pop(entry_id, ("", "", ""))
+        started = self._started.pop(entry_id, time.time())
         if not original:
-            if self._shown_partial:
-                self.on_entry("", "", "", True)
-                self._shown_partial = False
             return
-        if final:
-            print(f"[{self._language}] {original}\n     {done}", flush=True)
-        self.on_entry(original, done, pending, final)
-        self._shown_partial = not final
+        translation = f"{done} {pending}".strip()
+        print(f"[{self._language}] {original}\n     {translation}", flush=True)
+        self.transcript.write(started, original, translation)
 
     def _close_entry(self):
-        """Commit the open entry: the carried sentence did not go on."""
-        sentences = self._entry + ([(self._carry, self._translate(self._carry, self._language))] if self._carry else [])
-        self._show(sentences, "", "", final=True)
+        """Close the open entry: the carried sentence did not go on."""
+        sentences = self._entry + ([self._carry] if self._carry else [])
+        if self._render(self._id, sentences, "", "", self._language):
+            self._commit(self._id)
+        else:
+            self._waiting[self._id] = (sentences, self._language)
+        self._id += 1
         self._entry, self._carry, self._carry_audio, self._continues = [], "", None, None
-        self._cache.clear()
+        self._open_view = ([], "", "")
+        self._live_cache.clear()
+
+    def _show_open(self, sentences: list[str], tail_source: str, tail: str):
+        self._open_view = (sentences, tail_source, tail)
+        self._render(self._id, sentences, tail_source, tail, self._language)
+
+    def _apply_translations(self):
+        """Background translations arrived: update the entries waiting for them."""
+        if not self._upgraded.is_set():
+            return
+        self._upgraded.clear()
+        for entry_id, (sentences, language) in list(self._waiting.items()):
+            if self._render(entry_id, sentences, "", "", language):
+                del self._waiting[entry_id]
+                self._commit(entry_id)
+        if self._open_view[0] or self._open_view[1]:
+            self._render(self._id, *self._open_view, self._language)
+        # Translations no entry is waiting for any more.
+        if len(self._final) > 500:
+            for key in list(self._final)[:250]:
+                del self._final[key]
 
     def _handle(self, segment: Segment):
         started = time.monotonic()
@@ -187,7 +296,7 @@ class Pipeline:
                 # A new sentence: commit the entry and hear this line on its own.
                 self._close_entry()
                 self.stable.reset()
-                self._frozen, self._shown = [], ("", "")
+                self._frozen = []
                 self._handle(segment)
                 return
         text = result.text if result else ""
@@ -200,19 +309,17 @@ class Pipeline:
                 return
 
         units, tail = split_units(words)
-        # Complete sentences are translated once and never change on screen again.
-        for unit in units:
-            source = " ".join(unit)
-            self._frozen.append((source, self._translate(source, self._language)))
+        # Complete sentences are frozen: their text never changes on screen again.
+        self._frozen += [" ".join(unit) for unit in units]
         tail_source = " ".join(tail)
 
         if segment.final:
             # The last sentence may go on after the pause, so it stays open (grey) for now.
             if self._continues is None and self._carry:
                 # Nothing was heard: the carried sentence stays as it was.
-                self._frozen.insert(0, (self._carry, self._translate(self._carry, self._language)))
+                self._frozen.insert(0, self._carry)
             self._entry += self._frozen
-            self._frozen, self._shown = [], ("", "")
+            self._frozen = []
             self.stable.reset()
             self._carry, self._carry_audio, self._continues = tail_source, None, None
             self._carry_since = time.monotonic()
@@ -220,35 +327,34 @@ class Pipeline:
                 start = max(0, int((result.starts[len(result.starts) - len(tail)] - 0.1) * WHISPER_RATE))
                 if len(audio) - start <= MAX_CARRY_SECONDS * WHISPER_RATE:
                     self._carry_audio = audio[start:]
-            done_text, pending_text = "", self._translate(tail_source, self._language)
-            entry_words = sum(len(source.split()) for source, _ in self._entry) + len(tail)
+            pending_text = self._live(tail_source, self._language)
+            if tail_source and getattr(self.translator, "slow", False):
+                # Usually the sentence did end: have its final translation ready when the wait is over.
+                self._sentence(tail_source, self._language)
+            entry_words = sum(len(source.split()) for source in self._entry) + len(tail)
             if self._carry_audio is None or entry_words >= MAX_ENTRY_WORDS:
                 self._close_entry()
             else:
-                self._show(self._entry, tail_source, pending_text, final=False)
+                self._show_open(self._entry, tail_source, pending_text)
         else:
-            done_text = " ".join(translated for _, translated in self._frozen)
-            pending_text = self._translate(tail_source, self._language, live=True)
-            if (done_text, pending_text) == self._shown:
-                return
-            self._shown = (done_text, pending_text)
-            self._show(self._entry + self._frozen, tail_source, pending_text, final=False)
+            pending_text = self._live(tail_source, self._language)
+            self._show_open(self._entry + self._frozen, tail_source, pending_text)
         logger.debug(
-            "{} {:.1f}s audio: waited {:.2f}s, whisper {:.2f}s, translate {:.2f}s, lag {:.2f}s | {} ~ {}",
+            "{} {:.1f}s audio: waited {:.2f}s, whisper {:.2f}s, translate {:.2f}s, lag {:.2f}s | {}",
             "final  " if segment.final else "partial", len(audio) / WHISPER_RATE,
             started - self._last_audio_at, transcribed - started, time.monotonic() - transcribed,
-            time.monotonic() - self._last_audio_at, done_text[-50:], pending_text,
+            time.monotonic() - self._last_audio_at, pending_text,
         )
 
     def _frozen_words(self) -> list[str]:
-        return " ".join(source for source, _ in self._frozen).split()
+        return " ".join(self._frozen).split()
 
     def _final_words(self, final: list[str]) -> list[str]:
         """Reconcile the final transcription with sentences already frozen on screen: keep those
         that the final text still contains and return only the words after them."""
         position = 0
         kept = 0
-        for source, _ in self._frozen:
+        for source in self._frozen:
             unit = [normalize_word(w) for w in source.split()]
             end = _find_unit_end(final, unit, position)
             if end is None:
@@ -274,8 +380,16 @@ class Pipeline:
             # Nobody went on speaking: the carried sentence was complete.
             if self._carry and self._continues is None and time.monotonic() - self._carry_since > self.join_seconds:
                 self._close_entry()
+            self._apply_translations()
         if self._entry or self._carry:
             self._close_entry()
+        # Give the background translations still running a moment to arrive.
+        deadline = time.monotonic() + 10
+        while self._waiting and time.monotonic() < deadline and not self.stopped.is_set():
+            self._upgraded.wait(0.2)
+            self._apply_translations()
+        for entry_id in list(self._waiting):
+            self._commit(entry_id)
         logger.info("Audio stream finished")
 
 
@@ -308,11 +422,15 @@ def run(args) -> int:
             return 1
 
     # 2. Translation backends: one for the text that stays, a cheap one for the live line
-    translator = create_translator(config.TRANSLATE_BACKEND, config.TARGET_LANG, config.DEEPL_API_KEY, config.ARGOS_DIR)
+    translator = create_translator(
+        config.TRANSLATE_BACKEND, config.TARGET_LANG, config.DEEPL_API_KEY, config.ARGOS_DIR,
+        config.OLLAMA_MODEL, config.OLLAMA_URL,
+    )
     live_backend = config.LIVE_BACKEND
     if live_backend == "auto":
-        # DeepL bills per character and the live line is re-translated twice a second.
-        live_backend = "argos" if translator.name == "deepl" else "same"
+        # DeepL bills per character and the live line is re-translated twice a second;
+        # a local LLM is too slow for it.
+        live_backend = {"deepl": "argos", "ollama": "apple"}.get(translator.name, "same")
     live_translator = translator
     if live_backend == "off":
         live_translator = None
@@ -350,11 +468,15 @@ def run(args) -> int:
         )
         overlay.show()
 
+    transcript = Transcript(config.TRANSCRIPT_DIR, config.SAVE_TRANSCRIPT or args.save, config.SOURCE_LANG, config.TARGET_LANG)
+
     segmenter = Segmenter(config.PARTIAL_STEP_SECONDS, config.PAUSE_SECONDS, config.MAX_SEGMENT_SECONDS, config.SILENCE_THRESHOLD)
     pipeline = Pipeline(
         blocks, segmenter, transcriber, translator, live_translator,
-        overlay.update_entry if overlay else lambda *_: None, config.JOIN_PAUSE_SECONDS,
+        overlay.update_entry if overlay else lambda *_: None, config.JOIN_PAUSE_SECONDS, transcript,
     )
+    if overlay:
+        overlay.set_transcript(transcript)
 
     # 5. Start
     if args.file:
@@ -389,6 +511,7 @@ def run(args) -> int:
             if capture:
                 capture.stop()
             pipeline.stop()
+            transcript.close()
             for backend in (translator, live_translator):
                 close = getattr(backend, "close", None)
                 if close:
@@ -403,6 +526,7 @@ def main() -> int:
     parser.add_argument("--list-devices", action="store_true", help="list audio input devices and exit")
     parser.add_argument("--file", help="play an audio file through the pipeline instead of live capture (for testing)")
     parser.add_argument("--no-overlay", action="store_true", help="stdout only, no window")
+    parser.add_argument("--save", action="store_true", help=f"save the conversation to a text file in {config.TRANSCRIPT_DIR}")
     parser.add_argument("-v", "--verbose", action="store_true", help="debug logging (latency of every update)")
     args = parser.parse_args()
 
