@@ -23,7 +23,7 @@ away from the call. Drag it anywhere with the mouse: that position is remembered
 found (`~/.local/share/transwhisper/overlay.json`).
 
 The app also has a **menu bar item** (a `T` near the clock) with *Show the window*, *Reset the position* and
-*Quit*, and a Dock icon — use them when the window ends up somewhere you cannot reach it. Final lines (original + translation) are also printed to stdout.
+*Quit*, and a Dock icon — use them when the window ends up somewhere you cannot reach it. Started from a terminal, final lines (original + translation) are also printed there.
 
 ## 1. Allow system audio recording
 
@@ -93,7 +93,7 @@ Defaults live in `config.py`.
 | `WHISPER_THREADS` | `8` | CPU threads for Whisper |
 | `SOURCE_LANG` | `en` | Language spoken in the call, or `auto` to detect it per line |
 | `TARGET_LANG` | `uk` | Language to translate into (`de`, `pl`, `es`, ...) |
-| `TRANSLATE_BACKEND` | `apple`, or `deepl` if a key is set | Translation backend: `apple` (macOS), `ollama` (local LLM), `argos`, `deepl` |
+| `TRANSLATE_BACKEND` | `ollama`, or `deepl` if a key is set | Translation backend: `ollama` (local LLM), `apple` (macOS), `argos`, `deepl` |
 | `LIVE_BACKEND` | `auto` | Backend for the line still being spoken: `auto`, `same`, `argos`, `apple`, `off` |
 | `OLLAMA_MODEL` | `gemma3:12b` | Model for `TRANSLATE_BACKEND=ollama` |
 | `OLLAMA_URL` | `http://localhost:11434` | Ollama server |
@@ -109,13 +109,13 @@ Defaults live in `config.py`.
 
 ### Translation backends
 
-- **macOS** (`apple`, the default): the translator built into macOS — free, offline, no key, no quota, and clearly
+- **macOS** (`apple`): the translator built into macOS — free, offline, no key, no quota, and clearly
   better than Argos (~90 ms per sentence). Install the language pair once in **System Settings → General →
   Language & Region → Translation Languages**; an app without a window cannot start that download, so the app
   says so and falls back to Argos if the pair is missing. Needs macOS 15+ and the Xcode command line tools.
   The helper (`appletranslate/`) is built on first run. With `SOURCE_LANG=auto` the language Whisper reports for
   each line is used; a pair whose language pack is missing falls back to the text being left untranslated.
-- **Local LLM** (`ollama`, best quality offline): a language model run by [Ollama](https://ollama.com) on
+- **Local LLM** (`ollama`, the default, best quality offline): a language model run by [Ollama](https://ollama.com) on
   your own machine. Unlike the macOS translator it translates idioms and jargon by meaning ("let's take this
   offline" → «обговоримо в окремій розмові», not «відвеземо це в автономний режим») and sees the previous
   sentences, so gender and terms stay right. Nothing leaves the computer.
@@ -123,7 +123,6 @@ Defaults live in `config.py`.
   ```sh
   brew install ollama        # or the app from ollama.com; it has to be running
   ollama pull gemma3:12b     # ~8 GB, one time
-  TRANSLATE_BACKEND=ollama python main.py
   ```
 
   It takes ~1.3 s per sentence on an M3 Max, so it works in the background: a finished sentence first appears
@@ -166,7 +165,8 @@ where it is; after a `git pull` the app runs the new code, no rebuild needed (re
 - **Translator** and **Translate into** in the `T` menu pick the translator (macOS or the local AI model) and the
   language; the app restarts with the new choice and remembers it (`~/.local/share/transwhisper/settings.json`,
   it wins over `.env`). Everything else is still set in `.env`.
-- There is no console: what it would print goes to `~/Library/Logs/transwhisper.log` (the last run).
+- There is no console: the log of the last run is in `~/Library/Logs/transwhisper.log` (start-up, errors and how long
+  each update took). The conversation itself is not written there; it is saved only with *Save the conversation*.
 
 ## 6. Run from the terminal
 

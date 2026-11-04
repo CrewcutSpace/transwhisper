@@ -71,10 +71,11 @@ SOURCE_LANG = _get("SOURCE_LANG", "en").lower()
 # --- Translation -----------------------------------------------------------
 TARGET_LANG = _get("TARGET_LANG", "uk").lower()
 DEEPL_API_KEY = os.getenv("DEEPL_API_KEY", "").strip()
+# ollama: a local LLM (best with idioms and context, ~1 s per sentence, needs Ollama running;
+#         without it the macOS translator is used)
 # apple: the translator built into macOS (free, offline, instant)
-# ollama: a local LLM (best with idioms and context, ~1 s per sentence, needs Ollama running)
 # argos: local models, weaker | deepl: very good, needs a key and has a character quota
-TRANSLATE_BACKEND = _get("TRANSLATE_BACKEND", "deepl" if DEEPL_API_KEY else "apple").lower()
+TRANSLATE_BACKEND = _get("TRANSLATE_BACKEND", "deepl" if DEEPL_API_KEY else "ollama").lower()
 # Backend for the grey line that is still being spoken: it is re-translated twice a second,
 # which would burn DeepL's character quota ~4x faster and is too much for a local LLM.
 # auto | same | argos | apple | off

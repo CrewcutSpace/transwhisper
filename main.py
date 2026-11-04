@@ -244,7 +244,10 @@ class Pipeline:
         if not original:
             return
         translation = f"{done} {pending}".strip()
-        print(f"[{self._language}] {original}\n     {translation}", flush=True)
+        # Only to a terminal: started as the app, the output goes to the log file, and the
+        # conversation must not be kept there (it is saved only when saving is switched on).
+        if sys.stdout.isatty():
+            print(f"[{self._language}] {original}\n     {translation}", flush=True)
         self.transcript.write(started, original, translation)
 
     def _close_entry(self):
@@ -345,7 +348,7 @@ class Pipeline:
             "{} {:.1f}s audio: waited {:.2f}s, whisper {:.2f}s, translate {:.2f}s, lag {:.2f}s | {}",
             "final  " if segment.final else "partial", len(audio) / WHISPER_RATE,
             started - self._last_audio_at, transcribed - started, time.monotonic() - transcribed,
-            time.monotonic() - self._last_audio_at, pending_text,
+            time.monotonic() - self._last_audio_at, pending_text if sys.stderr.isatty() else "",
         )
 
     def _frozen_words(self) -> list[str]:
@@ -568,7 +571,8 @@ def main() -> int:
     logger.remove()
     logger.add(
         sys.stderr,
-        level="DEBUG" if args.verbose else "INFO",
+        # Started as the app (no terminal) the log file also gets the latency of every update, without the text.
+        level="DEBUG" if args.verbose or not sys.stderr.isatty() else "INFO",
         format="<green>{time:HH:mm:ss.SSS}</green> <level>{level: <7}</level> {message}",
     )
     # Third-party libraries log through stdlib logging; keep only their errors.
