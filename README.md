@@ -95,7 +95,7 @@ Defaults live in `config.py`.
 | `TARGET_LANG` | `uk` | Language to translate into (`de`, `pl`, `es`, ...) |
 | `TRANSLATE_BACKEND` | `ollama`, or `deepl` if a key is set | Translation backend: `ollama` (local LLM), `apple` (macOS), `argos`, `deepl` |
 | `LIVE_BACKEND` | `auto` | Backend for the line still being spoken: `auto`, `same`, `argos`, `apple`, `off` |
-| `OLLAMA_MODEL` | `gemma3:12b` | Model for `TRANSLATE_BACKEND=ollama` |
+| `OLLAMA_MODEL` | `gemma4:12b` | Model for `TRANSLATE_BACKEND=ollama` |
 | `OLLAMA_URL` | `http://localhost:11434` | Ollama server |
 | `DEEPL_API_KEY` | — | DeepL API key (free tier), only from env/.env |
 | `ARGOS_DIR` | `~/.local/share/transwhisper/argos` | Where Argos models are downloaded |
@@ -122,13 +122,14 @@ Defaults live in `config.py`.
 
   ```sh
   brew install ollama        # or the app from ollama.com; it has to be running
-  ollama pull gemma3:12b     # ~8 GB, one time
+  ollama pull gemma4:12b     # ~8 GB, one time
   ```
 
-  It takes ~1.3 s per sentence on an M3 Max, so it works in the background: a finished sentence first appears
+  It takes ~0.8 s per sentence on an M3 Max, so it works in the background: a finished sentence first appears
   grey with the macOS translation and turns white when the model's translation arrives. Measured on call-like
-  English, `gemma3:12b` translated best; `gemma3:4b` (~0.5 s) is faster but adds things of its own; `qwen3:14b`
-  was worse than the macOS translator in Ukrainian. Avoid "thinking" models such as `deepseek-r1`: they spend
+  English: `gemma4:12b` is twice as fast as `gemma3:12b` (~1.7 s) and uses IT terms the way people say them
+  (хотфікс, білінг, деплоїти), but now and then mangles an idiom, where `gemma3:12b` stays more literal;
+  `gemma3:4b` (~0.5 s) adds things of its own; `qwen3:14b` was worse than the macOS translator in Ukrainian. Avoid "thinking" models such as `deepseek-r1`: they spend
   seconds reasoning before every sentence. If Ollama is not running or the model is missing, the app says so and
   uses the macOS translator.
 - **Argos** (`argos`, no key needed): local models, weaker quality. The model for the language pair (~70–100 MB)

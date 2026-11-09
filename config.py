@@ -81,9 +81,10 @@ TRANSLATE_BACKEND = _get("TRANSLATE_BACKEND", "deepl" if DEEPL_API_KEY else "oll
 # auto | same | argos | apple | off
 # auto = the main backend, unless that is DeepL (then Argos) or Ollama (then apple).
 LIVE_BACKEND = _get("LIVE_BACKEND", "auto").lower()
-# Ollama model and server for TRANSLATE_BACKEND=ollama. gemma3:12b translates best of the ones
-# tried; gemma3:4b is ~3x faster but takes liberties. Install with: ollama pull gemma3:12b
-OLLAMA_MODEL = _get("OLLAMA_MODEL", "gemma3:12b")
+# Ollama model and server for TRANSLATE_BACKEND=ollama. gemma4:12b is twice as fast as gemma3:12b
+# and keeps IT terms the way people say them, but now and then mangles an idiom; gemma3:12b is more
+# literal. Install with: ollama pull gemma4:12b
+OLLAMA_MODEL = _get("OLLAMA_MODEL", "gemma4:12b")
 OLLAMA_URL = _get("OLLAMA_URL", "http://localhost:11434")
 # Where downloaded Argos models are stored.
 ARGOS_DIR = Path(_get("ARGOS_DIR", str(Path.home() / ".local/share/transwhisper/argos"))).expanduser()
