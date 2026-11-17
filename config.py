@@ -58,11 +58,13 @@ JOIN_PAUSE_SECONDS = float(_get("JOIN_PAUSE_SECONDS", "3"))
 # Lines are force-split when someone talks this long without a pause.
 MAX_SEGMENT_SECONDS = float(_get("MAX_SEGMENT_SECONDS", "12"))
 
-# --- Transcription (faster-whisper) ----------------------------------------
-# small: ~0.7 s per update, accurate (default) | base: ~0.3 s, mishears more | medium: slow.
-# For English the English-only variant (base.en, ...) is picked automatically.
-MODEL_SIZE = _get("MODEL_SIZE", "small")
-WHISPER_DEVICE = _get("WHISPER_DEVICE", "cpu")
+# --- Transcription (Whisper) -------------------------------------------------
+# mlx: on the Apple GPU with mlx-whisper (default) | cpu: faster-whisper.
+WHISPER_DEVICE = _get("WHISPER_DEVICE", "mlx")
+# mlx: large-v3-turbo (default), or any mlx-community/whisper-* repo.
+# cpu: small: ~0.7 s per update (default) | base: ~0.3 s, mishears more | medium: slow.
+# For English on the CPU the English-only variant (base.en, ...) is picked automatically.
+MODEL_SIZE = _get("MODEL_SIZE", "large-v3-turbo" if WHISPER_DEVICE == "mlx" else "small")
 WHISPER_COMPUTE_TYPE = _get("WHISPER_COMPUTE_TYPE", "int8")
 WHISPER_THREADS = int(_get("WHISPER_THREADS", "8"))
 # Language spoken in the call: ISO code (en, de, ...) or "auto" to detect per line.

@@ -1,12 +1,17 @@
-"""Speech-to-text with faster-whisper."""
+"""Speech-to-text with Whisper: on the Apple GPU with mlx-whisper, or on the CPU with faster-whisper."""
 
+import os
 from dataclasses import dataclass
 
 import numpy as np
-from faster_whisper import WhisperModel
 from loguru import logger
 
 ENGLISH_ONLY_MODELS = {"tiny", "base", "small", "medium"}
+# MLX conversions of the models live under different names on Hugging Face.
+MLX_REPOS = {"large-v3-turbo": "mlx-community/whisper-large-v3-turbo"}
+
+# Hugging Face's default downloader (xet) broke off half way here; the plain one works.
+os.environ.setdefault("HF_HUB_DISABLE_XET", "1")
 
 
 @dataclass
@@ -21,6 +26,29 @@ class Transcriber:
     def __init__(self, model_size: str, device: str, compute_type: str, threads: int, language: str):
         # "auto" lets Whisper detect the language of every line.
         self.language = None if language == "auto" else language
+        self.mlx_repo = None
+        if device == "mlx":
+            try:
+                self._load_mlx(model_size)
+                return
+            except Exception as exc:
+                logger.warning("Could not load Whisper on the GPU ({}), falling back to 'small' on the CPU", exc)
+                model_size, device, compute_type = "small", "cpu", "int8"
+        self._load_faster_whisper(model_size, device, compute_type, threads, language)
+
+    def _load_mlx(self, model_size: str):
+        import mlx_whisper
+
+        repo = model_size if "/" in model_size else MLX_REPOS.get(model_size, f"mlx-community/whisper-{model_size}-mlx")
+        # Loads (and on the first run downloads) the model, and warms it up.
+        mlx_whisper.transcribe(np.zeros(16000, np.float32), path_or_hf_repo=repo, language=self.language or "en")
+        self._mlx = mlx_whisper
+        self.mlx_repo = repo
+        logger.info("Whisper model '{}' loaded (device=mlx)", repo)
+
+    def _load_faster_whisper(self, model_size: str, device: str, compute_type: str, threads: int, language: str):
+        from faster_whisper import WhisperModel
+
         # English-only models are faster and more accurate for English.
         if language == "en" and model_size in ENGLISH_ONLY_MODELS:
             model_size = f"{model_size}.en"
@@ -35,6 +63,8 @@ class Transcriber:
             logger.info("Whisper model '{}' loaded (device=cpu, compute_type=int8)", model_size)
 
     def transcribe(self, audio: np.ndarray, final: bool) -> Transcript | None:
+        if self.mlx_repo:
+            return self._transcribe_mlx(audio, final)
         segments, info = self.model.transcribe(
             audio,
             language=self.language,
@@ -56,3 +86,22 @@ class Transcriber:
         if not words:
             return None
         return Transcript(text=" ".join(w for w, _ in words), language=info.language, starts=[t for _, t in words])
+
+    def _transcribe_mlx(self, audio: np.ndarray, final: bool) -> Transcript | None:
+        # Same choices as with faster-whisper above, minus beam search and VAD, which mlx-whisper lacks.
+        result = self._mlx.transcribe(
+            audio.astype(np.float32, copy=False),
+            path_or_hf_repo=self.mlx_repo,
+            language=self.language,
+            condition_on_previous_text=False,
+            without_timestamps=not final,
+            word_timestamps=final,
+        )
+        language = result.get("language") or self.language or "en"
+        if not final:
+            text = result["text"].strip()
+            return Transcript(text=text, language=language) if text else None
+        words = [(w["word"].strip(), w["start"]) for s in result["segments"] for w in s.get("words", []) if w["word"].strip()]
+        if not words:
+            return None
+        return Transcript(text=" ".join(w for w, _ in words), language=language, starts=[t for _, t in words])

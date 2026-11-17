@@ -3,10 +3,10 @@
 Local real-time call translator for macOS (Apple Silicon).
 
 Captures the audio of a video call (Meet / Zoom / Teams / anything), transcribes it locally
-with faster-whisper and shows a live translation into the language you pick.
+with Whisper (mlx-whisper on the Apple GPU) and shows a live translation into the language you pick.
 
 ```
-[call audio] → [BlackHole] → [faster-whisper: speech → text] → [translate] → [overlay + stdout]
+[call audio] → [BlackHole] → [Whisper: speech → text] → [translate] → [overlay + stdout]
 ```
 
 The window shows the last ~10 lines. The line being spoken appears after ~1.5 s. A word is shown only once it has been
@@ -73,7 +73,7 @@ source .venv/bin/activate     # fish: source .venv/bin/activate.fish
 pip install -r requirements.txt
 ```
 
-The Whisper model (~150 MB for `base`, ~500 MB for `small`) is downloaded on first run and cached in `~/.cache/huggingface`.
+The Whisper model (~1.6 GB for `large-v3-turbo`) is downloaded on first run and cached in `~/.cache/huggingface`.
 
 ## 4. Configure
 
@@ -89,8 +89,9 @@ Defaults live in `config.py`.
 | `PAUSE_SECONDS` | `0.6` | A pause this long finalises the line |
 | `JOIN_PAUSE_SECONDS` | `3` | A sentence interrupted by a pause up to this long is joined with what follows and translated whole |
 | `MAX_SEGMENT_SECONDS` | `12` | Long speech without pauses is split at a short breath around this length |
-| `MODEL_SIZE` | `small` | Whisper model: `small` (~0.7 s per update), `base` (~0.3 s, mishears more), `medium` (slow). With `SOURCE_LANG=en` the English-only variant is used |
-| `WHISPER_THREADS` | `8` | CPU threads for Whisper |
+| `WHISPER_DEVICE` | `mlx` | Where Whisper runs: `mlx` (Apple GPU, mlx-whisper) or `cpu` (faster-whisper) |
+| `MODEL_SIZE` | `large-v3-turbo` | Whisper model. On `mlx`: `large-v3-turbo` or any `mlx-community/whisper-*` repo. On `cpu` (default `small`): `small` (~0.7 s per update), `base` (~0.3 s, mishears more), `medium` (slow); with `SOURCE_LANG=en` the English-only variant is used |
+| `WHISPER_THREADS` | `8` | CPU threads for Whisper (`cpu` only) |
 | `SOURCE_LANG` | `en` | Language spoken in the call, or `auto` to detect it per line |
 | `TARGET_LANG` | `uk` | Language to translate into (`de`, `pl`, `es`, ...) |
 | `TRANSLATE_BACKEND` | `ollama`, or `deepl` if a key is set | Translation backend: `ollama` (local LLM), `apple` (macOS), `argos`, `deepl` |
